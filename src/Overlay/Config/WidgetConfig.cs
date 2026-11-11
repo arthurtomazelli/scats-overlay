@@ -7,9 +7,9 @@ public enum Position { TopLeft, TopCenter, TopRight, CenterLeft, Center, CenterR
 public sealed class WidgetConfig
 {
     // Placement
-    public Position Position { get; set; } = Position.TopRight;
-    public int OffsetX { get; set; } = 48;
-    public int OffsetY { get; set; } = 48;
+    public Position Position { get; set; } = Position.Center;
+    public int OffsetX { get; set; } = 0;
+    public int OffsetY { get; set; } = 0;
     /// <summary>"primary", "all", or 1-based monitor numbers like "1,2". One widget per monitor.</summary>
     public string Monitors { get; set; } = "primary";
 
