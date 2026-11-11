@@ -99,6 +99,22 @@ public sealed class CatConfig
     public bool ClickReactions { get; set; } = true;
     /// <summary>When a notification or flyout covers it, peek over its top edge (needs <see cref="Topmost"/>).</summary>
     public bool PeekOverPopups { get; set; } = true;
+    /// <summary>
+    /// Mirrored, at the left end of the taskbar instead: tail on the left, facing and running right.
+    /// <see cref="OffsetX"/> then counts from the left edge.
+    /// </summary>
+    public bool Flip { get; set; } = false;
+    public KittenConfig Kitten { get; set; } = new();
+}
+
+/// <summary>A tiny second cat that keeps the big one company, batting its tail or leaping over it.</summary>
+public sealed class KittenConfig
+{
+    public bool Enabled { get; set; } = false;
+    /// <summary>Size relative to the normal cat size (the big cat's own <see cref="CatConfig.Scale"/> doesn't apply).</summary>
+    public double Scale { get; set; } = 0.5;
+    /// <summary>Leaps over the big cat after a random wait in this range [min, max], in seconds.</summary>
+    public List<double> JumpEverySeconds { get; set; } = [35, 45];
 }
 
 /// <summary>Values at or past these get the accent color.</summary>

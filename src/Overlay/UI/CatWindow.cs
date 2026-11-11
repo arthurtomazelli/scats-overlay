@@ -78,6 +78,80 @@ public sealed class CatWindow : Window
 
     public string ScreenName { get; private set; }
 
+    /// <summary>Where a seated cat is on screen, in physical pixels (all x's are screen x's).</summary>
+    public readonly record struct SeatedPose(int BodyLeft, int BodyRight, int TailTip, int Top, int Floor, bool Flipped, bool Asleep);
+
+    /// <summary>
+    /// Where it sits, while it's sitting in its spot; null while it runs, is away, peeks or is
+    /// hidden. What the kitten keeps itself next to.
+    /// </summary>
+    public SeatedPose? Seated
+    {
+        get
+        {
+            if (_hwnd == IntPtr.Zero || _running || _away || IsPeeking || !IsVisible || !Native.GetWindowRect(_hwnd, out var r))
+                return null;
+            return PoseAt(r.Left, r.Bottom);
+        }
+    }
+
+    /// <summary>Where it sits (or will sit) in its spot on its current screen, whatever it's doing now.</summary>
+    public SeatedPose HomeSeat
+    {
+        get
+        {
+            var area = Screens.ByName(ScreenName).WorkingArea;
+            return PoseAt(HomeX(area, VisualTreeHelper.GetDpi(this).DpiScaleX), area.Bottom);
+        }
+    }
+
+    private SeatedPose PoseAt(int left, int bottom)
+    {
+        double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        int X(double dip) => left + (int)Math.Round(dip * scale);
+        return new SeatedPose(X(_cat.BodyLeft), X(_cat.BodyLeft + _cat.BodyWidth), X(_cat.TailTipX),
+            bottom - (int)Math.Round(_cat.CatHeight * scale), bottom, _cfg.Flip, _cat.Asleep);
+    }
+
+    /// <summary>
+    /// Raised the moment it starts to run or peek, so the kitten can react right away: during a
+    /// run the UI thread is busy every frame and slow timers don't get a turn.
+    /// </summary>
+    public event Action? Moved;
+
+    public enum MoveKind { Seated, Running, Peeking, Away, Hidden }
+
+    /// <summary>
+    /// What the cat is doing at one moment, in screen pixels, for the kitten to copy a moment
+    /// later. CenterX is its body's center (or where it would be, mid-run); while peeking,
+    /// PawsLine is the bottom of its paws, Edge where it's cut off, and GetUp (0..1, else -1) how
+    /// far it has risen from the taskbar back into its seat.
+    /// </summary>
+    public readonly record struct Move(MoveKind Kind, string Screen, double CenterX, int Dir,
+        double PawsLine, double Edge, bool Paws, bool Landed, double GetUp, double CardLeft, double CardRight);
+
+    public Move CurrentMove
+    {
+        get
+        {
+            if (_hwnd == IntPtr.Zero || !IsVisible) return new(MoveKind.Hidden, ScreenName, 0, RunDir, 0, 0, false, false, -1, 0, 0);
+            if (_away) return new(MoveKind.Away, ScreenName, 0, RunDir, 0, 0, false, false, -1, 0, 0);
+            double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+            double mid = (_cat.BodyLeft + _cat.BodyWidth / 2) * scale;
+            if (_running) return new(MoveKind.Running, ScreenName, _runX + mid, RunDir, 0, 0, false, false, -1, 0, 0);
+            if (!IsPeeking) return new(MoveKind.Seated, ScreenName, 0, RunDir, 0, 0, false, false, -1, 0, 0);
+
+            var area = Screens.ByName(ScreenName).WorkingArea;
+            double paws = (_cat.GridTop + (CatView.PeekEdgeRow + 1) * _cat.BlockSize) * scale;
+            double floorY = area.Bottom - paws, homeY = BottomY(area, scale);
+            double getUp = _peek == PeekPhase.GettingUp && floorY > homeY ? (floorY - _peekY) / (floorY - homeY) : -1;
+            return new(MoveKind.Peeking, ScreenName, _peekX + mid, RunDir, _peekY + paws, _edge,
+                _cat.PeekPawsOut, _peek == PeekPhase.Landed, getUp, _card.Left, _card.Right);
+        }
+    }
+
+    /// <summary>The color it's showing right now (it shifts with what's beneath it).</summary>
+    public Color CurrentColor => _currentColor;
     /// <summary>
     /// While a fullscreen app has focus the cat settles down and naps a few seconds later, staying
     /// asleep until the app closes or loses focus (hovering still wakes it briefly).
@@ -176,6 +250,7 @@ public sealed class CatWindow : Window
         _timer.Interval = FrameInterval(cfg);
         // Start from the soft tint; UpdateTone moves to the right color within a couple of seconds.
         _currentColor = _targetColor = tint;
+        _cat.Flipped = cfg.Flip;
         _cat.Configure(cfg, VisualTreeHelper.GetDpi(this).PixelsPerDip, tint);
         // Still click-through: the click goes on to whatever is beneath, the cat just reacts.
         if (cfg.ClickReactions && _clicks is null && _hwnd != IntPtr.Zero)
@@ -350,9 +425,13 @@ public sealed class CatWindow : Window
         WindowPlacement.MoveTo(_hwnd, HomeX(area, scale), BottomY(area, scale));
     }
 
-    /// <summary>Window x that puts the cat at its spot (the extra room for the bubble extends to its right).</summary>
-    private int HomeX(System.Drawing.Rectangle area, double scale) =>
-        area.Right - (int)Math.Round(_cat.CatWidth * scale) - (int)Math.Round(_cfg.OffsetX * scale);
+    /// <summary>
+    /// Window x that puts the cat at its spot: <see cref="CatConfig.OffsetX"/> in from the right
+    /// edge, or from the left edge when mirrored (the extra room for the bubble extends to its right).
+    /// </summary>
+    private int HomeX(System.Drawing.Rectangle area, double scale) => _cfg.Flip
+        ? area.Left + (int)Math.Round((_cfg.OffsetX - _cat.GridLeft) * scale)
+        : area.Right - (int)Math.Round(_cat.CatWidth * scale) - (int)Math.Round(_cfg.OffsetX * scale);
 
     /// <summary>Window y that sits the cat on top of a bottom taskbar. Uses the WPF layout size,
     /// since on SizeChanged the HWND may not have been resized yet.</summary>
@@ -374,17 +453,26 @@ public sealed class CatWindow : Window
     private double _strideLeft; // DIPs until the next gallop step
     private readonly Stopwatch _runClock = new();
 
+    /// <summary>+1 when it runs right (mirrored), -1 when it runs left.</summary>
+    private int RunDir => _cfg.Flip ? 1 : -1;
+
+    /// <summary>Window x that has the running sprite just out of sight past the edge it comes in from.</summary>
+    private double EntryX(System.Drawing.Rectangle area, double scale) => RunDir < 0
+        ? area.Right - _cat.RunSpriteLeft * scale
+        : area.Left - (_cat.RunSpriteLeft + _cat.RunSpriteWidth) * scale;
+
     /// <summary>
-    /// Always runs left: off the left edge of the current screen, then in from the right edge of the
-    /// next (<paramref name="dest"/> null: it stays off screen). <paramref name="entering"/> skips
-    /// the first half, coming straight in on <paramref name="dest"/>.
+    /// Always runs the way it faces (left, or right when mirrored): off that edge of the current
+    /// screen, then in from the opposite edge of the next (<paramref name="dest"/> null: it stays
+    /// off screen). <paramref name="entering"/> skips the first half, coming straight in on
+    /// <paramref name="dest"/>.
     /// </summary>
     private void StartRun(string? dest, bool entering = false)
     {
         if (IsPeeking) EndPeekNow();
         if (entering)
         {
-            _runX = Screens.ByName(dest!).WorkingArea.Right - _cat.RunSpriteLeft * VisualTreeHelper.GetDpi(this).DpiScaleX;
+            _runX = EntryX(Screens.ByName(dest!).WorkingArea, VisualTreeHelper.GetDpi(this).DpiScaleX);
         }
         else if (Native.GetWindowRect(_hwnd, out var r)) _runX = r.Left;
         else
@@ -405,6 +493,7 @@ public sealed class CatWindow : Window
         _runClock.Restart();
         // Once per displayed frame, so motion lines up with the screen's refresh.
         CompositionTarget.Rendering += OnRunFrame;
+        Moved?.Invoke();
     }
 
     private void OnRunFrame(object? sender, EventArgs e)
@@ -421,12 +510,12 @@ public sealed class CatWindow : Window
         _runSpeed = Math.Min(RunTopSpeedDip, _runSpeed + RunTopSpeedDip / RunAccelSeconds * dt);
         if (_entering)
         {
-            double remainingDip = Math.Max(0, (_runX - HomeX(area, scale)) / scale);
+            double remainingDip = Math.Max(0, (HomeX(area, scale) - _runX) * RunDir / scale);
             double decel = RunTopSpeedDip / RunAccelSeconds;
             _runSpeed = Math.Min(_runSpeed, Math.Max(RunArriveSpeedDip, Math.Sqrt(2 * decel * remainingDip)));
         }
         double moveDip = _runSpeed * dt;
-        _runX -= moveDip * scale;
+        _runX += RunDir * moveDip * scale;
 
         // Legs advance by distance travelled, so they never look like they're sliding.
         _strideLeft -= moveDip;
@@ -438,9 +527,10 @@ public sealed class CatWindow : Window
 
         if (!_entering)
         {
-            // Fully off the left edge: hop to just past the right edge of the destination.
-            double spriteRight = _runX + (_cat.RunSpriteLeft + _cat.RunSpriteWidth) * scale;
-            if (spriteRight <= area.Left)
+            // Fully off this screen: hop to just past the far edge of the destination.
+            double spriteLeft = _runX + _cat.RunSpriteLeft * scale;
+            double spriteRight = spriteLeft + _cat.RunSpriteWidth * scale;
+            if (RunDir < 0 ? spriteRight <= area.Left : spriteLeft >= area.Right)
             {
                 if (_runDest is null)
                 {
@@ -450,11 +540,11 @@ public sealed class CatWindow : Window
                 }
                 ScreenName = _runDest ?? ScreenName;
                 area = Screens.ByName(ScreenName).WorkingArea;
-                _runX = area.Right - _cat.RunSpriteLeft * scale;
+                _runX = EntryX(area, scale);
                 _entering = true;
             }
         }
-        else if (_runX <= HomeX(area, scale))
+        else if ((HomeX(area, scale) - _runX) * RunDir <= 0)
         {
             FinishRun();
             return;
@@ -496,6 +586,7 @@ public sealed class CatWindow : Window
     private const double GetUpSeconds = 0.2;     // from peeking over the taskbar up into its seat
 
     private PeekPhase _peek;
+    private System.Drawing.Rectangle _card; // the card it peeks over, as last seen
     private long _landedAt;       // landed: TickCount64 when the card last moved (or left)
     private double _landedEdge;   // landed: the card's top when last seen; MaxValue once it has left
     private IntPtr _ignoredPopup; // got up from peeking over this one; leave it be while it stays
@@ -594,6 +685,7 @@ public sealed class CatWindow : Window
     private void StartPeek()
     {
         if (CurrentCard() is not { } card) return;
+        _card = card;
         double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         var area = Screens.ByName(ScreenName).WorkingArea;
         double px = _cat.BlockSize * scale;
@@ -612,6 +704,7 @@ public sealed class CatWindow : Window
         _cat.SetPeeking(true);
         _peekClock.Restart();
         CompositionTarget.Rendering += OnPeekFrame;
+        Moved?.Invoke();
     }
 
     /// <summary>Every displayed frame while peeking: follows the card, or drops when it's gone.</summary>
@@ -661,6 +754,7 @@ public sealed class CatWindow : Window
             return;
         }
         var card = current!.Value;
+        _card = card;
         if (dt > 0 && _peek != PeekPhase.Rising) _cardSpeed = (card.Top - _edge) / scale / dt;
         _edge = card.Top;
 

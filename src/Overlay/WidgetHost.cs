@@ -22,6 +22,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
     private readonly MetricsPresenter _presenter = new();
     private readonly List<MainWindow> _widgets = [];
     private readonly List<CatWindow> _cats = [];
+    private readonly List<KittenWindow> _kittens = [];
     private SensorPoller? _poller;
     private TrayIcon? _tray;
     private SettingsWindow? _settings;
@@ -156,6 +157,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
         SyncWindows();
         foreach (var w in _widgets) w.ApplyConfig(Cfg);
         foreach (var c in _cats) c.ApplyConfig(Cfg.Cat, CatWindow.TintFor(Cfg));
+        foreach (var k in _kittens) k.ApplyConfig(Cfg.Cat);
         _modes!.SetEnabled(Cfg.GameMode.Enabled);
     }
 
@@ -206,7 +208,27 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
             PlaceCat();
         }
 
+        SyncKittens();
         RefreshActiveMetrics();
+    }
+
+    /// <summary>One kitten per cat when kittens are on, none otherwise.</summary>
+    private void SyncKittens()
+    {
+        bool want = Cfg.Cat.Kitten.Enabled;
+        bool matches = want
+            ? _kittens.Count == _cats.Count && _kittens.Zip(_cats).All(p => p.First.Mom == p.Second)
+            : _kittens.Count == 0;
+        if (matches) return;
+        foreach (var k in _kittens) k.Close();
+        _kittens.Clear();
+        if (!want) return;
+        foreach (var c in _cats)
+        {
+            var k = new KittenWindow(c, Cfg.Cat);
+            k.Show();
+            _kittens.Add(k);
+        }
     }
 
     private IReadOnlyList<string> ShownMetrics() => Mode == DisplayMode.Desktop ? Cfg.Metrics : Cfg.GameMode.Metrics;

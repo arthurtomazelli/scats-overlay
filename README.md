@@ -42,6 +42,9 @@ up                 11d 15h
   it runs off the screen instead and comes back a few seconds after you leave the app.
 - When a notification or tray flyout covers it, it peeks over the top edge with its paws on it,
   rides it down if it slides away, and gets back up on the taskbar once it's gone.
+- Can be mirrored to sit at the left end of the taskbar instead.
+- Optional kitten: a tiny second cat that sits by the big one and now and then leaps over it
+  to the other side. It naps when the big cat naps.
 
 ## Requirements
 
@@ -92,6 +95,9 @@ The task points at the Release build in this repo. Pass `-ExePath` to point it s
 | `cat.avoidFullscreen`, `cat.runBetweenScreens` | Screen hopping around fullscreen apps |
 | `cat.thoughts`, `cat.clickReactions`, `cat.moods` | Thought bubble, squish on click, CPU-driven mood |
 | `cat.peekOverPopups` | Peek over notifications and flyouts that cover it |
+| `cat.flip` | Mirror it and sit it at the left end of the taskbar |
+| `cat.kitten.enabled`, `cat.kitten.scale` | The kitten, and its size (0.5 by default) |
+| `cat.kitten.jumpEverySeconds` | How often it leaps over the big cat: random within `[min, max]` |
 
 ## Project layout
 

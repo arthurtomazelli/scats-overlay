@@ -332,6 +332,8 @@ public sealed class CatView : FrameworkElement
     private bool _running;
     private bool _peeking;
     private bool _peekPaws;
+    private bool _flipped;
+    private bool _jumping;  // mid-leap: the stretched-out gallop frame
     // The squish runs on its own clock: the frame rate (8 fps) is too slow for a snappy pop.
     public const int SquishMs = 150;
     private bool _squished;
@@ -376,8 +378,45 @@ public sealed class CatView : FrameworkElement
     public double GridTop => _top;
 
     /// <summary>Horizontal extent of the sitting body (ears to flanks, no tail) inside the view, in DIPs.</summary>
-    public double BodyLeft => LeftMargin + _px;
+    public double BodyLeft => _flipped ? 2 * Pivot - (LeftMargin + 12 * _px) : LeftMargin + _px;
     public double BodyWidth => 11 * _px;
+
+    /// <summary>Where the tail stretched out along the ground ends, inside the view, in DIPs.</summary>
+    public double TailTipX => _flipped ? 2 * Pivot - (LeftMargin + 16 * _px) : LeftMargin + 16 * _px;
+
+    /// <summary>Where the cat's grid starts inside the view: further in when mirrored, in DIPs.</summary>
+    public double GridLeft => _flipped ? 2 * Pivot - CatWidth : 0;
+
+    /// <summary>
+    /// Mirrored: the tail on the left, facing (and running) right. The bubble and z's still read
+    /// normally. Unmirrored, it faces left.
+    /// </summary>
+    public bool Flipped
+    {
+        get => _flipped;
+        set
+        {
+            if (value == _flipped) return;
+            _flipped = value;
+            InvalidateVisual();
+        }
+    }
+
+    // Poses are mirrored around this line, which keeps every pose (lying down is the widest)
+    // inside the view.
+    private double Pivot => Math.Max(LeftMargin + Cols * _px, Cols * _sleepPx) / 2;
+
+    public bool IsJumping => _jumping;
+
+    /// <summary>Mid-leap: drawn stretched out, like the widest stride of the gallop.</summary>
+    public void SetJumping(bool jumping)
+    {
+        if (jumping == _jumping) return;
+        _jumping = jumping;
+        _phrase = null;
+        _zs.Clear();
+        InvalidateVisual();
+    }
 
     /// <summary>
     /// Switches to the peeking pose (and drops the bubble/z's), or back. It comes up without its
@@ -404,6 +443,7 @@ public sealed class CatView : FrameworkElement
     /// <summary>Switches to the running sprite (and drops the bubble/z's), or back.</summary>
     public void SetRunning(bool running)
     {
+        if (running == _running) return; // already mid-gallop: keep its stride going
         _running = running;
         _runFrame = 0;
         _phrase = null;
@@ -458,6 +498,11 @@ public sealed class CatView : FrameworkElement
     }
 
     public void SetMood(Mood mood) => _mood = mood;
+
+    public bool Asleep => _asleep;
+
+    /// <summary>Peeking with its paws out on the edge (not while still coming up).</summary>
+    public bool PeekPawsOut => _peeking && _peekPaws;
 
     /// <summary>Asleep: lies down, eyes nearly shut, z's instead of the thought bubble.</summary>
     public void SetAsleep(bool asleep)
@@ -604,7 +649,7 @@ public sealed class CatView : FrameworkElement
     protected override void OnRender(DrawingContext dc)
     {
         if (_brushes.Length == 0) return;
-        if (_running)
+        if (_running || _jumping)
         {
             DrawRun(dc);
             return;
@@ -612,6 +657,7 @@ public sealed class CatView : FrameworkElement
 
         if (_phrase is { } phrase) DrawBubble(dc, phrase);
 
+        if (_flipped) dc.PushTransform(new ScaleTransform(-1, 1, Pivot, 0));
         bool squished = _squished && !_asleep;
         var silhouette = _peeking ? (squished ? SquishedPeekingSilhouette : PeekingSilhouette)
             : _asleep ? SleepingSilhouette : squished ? SquishedSilhouette : Silhouette;
@@ -644,6 +690,8 @@ public sealed class CatView : FrameworkElement
             else Block(dc, r, c);
         }
 
+        if (_flipped) dc.Pop();
+
         foreach (var (x, y, age) in _zs)
         {
             // Small z's growing as they rise, fading out at the end.
@@ -651,17 +699,23 @@ public sealed class CatView : FrameworkElement
             double alpha = age > 22 ? (30 - age) / 8.0 : 1;
             var z = new FormattedText(age < 12 ? "z" : "Z", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
                 _typeface, size, _bubbleText, _pixelsPerDip);
+            // Mirrored, the z's rise from the head's new spot but the letters stay readable.
+            double zx = _flipped ? 2 * Pivot - CellX(x) - z.Width : CellX(x);
             dc.PushOpacity(alpha);
-            dc.DrawText(z, new Point(CellX(x), CellY(y) - z.Height));
+            dc.DrawText(z, new Point(zx, CellY(y) - z.Height));
             dc.Pop();
         }
     }
 
-    /// <summary>The current gallop frame, bottom-aligned like the other poses, at the sitting block size.</summary>
+    /// <summary>
+    /// The current gallop frame (or the stretched-out leap), bottom-aligned like the other poses,
+    /// at the sitting block size. Mirrored in place, so it runs right instead of left.
+    /// </summary>
     private void DrawRun(DrawingContext dc)
     {
-        var frame = RunFrames[_runFrame % RunFrames.Length];
+        var frame = RunFrames[_jumping ? LeapFrame : _runFrame % RunFrames.Length];
         double s = _px, bottom = _top + Rows * _px;
+        if (_flipped) dc.PushTransform(new ScaleTransform(-1, 1, RunSpriteLeft + RunSpriteWidth / 2, 0));
         for (int r = 0; r < frame.Length; r++)
         {
             double y = bottom - (frame.Length - r) * s;
@@ -669,7 +723,10 @@ public sealed class CatView : FrameworkElement
                 if (frame[r][c] == '#')
                     dc.DrawRectangle(_brushes[_shade[r % Rows, c % Cols]], null, new Rect(RunSpriteLeft + c * s, y, s, s));
         }
+        if (_flipped) dc.Pop();
     }
+
+    private const int LeapFrame = 3; // "extended": all four legs out
 
     private void DrawBubble(DrawingContext dc, string phrase)
     {

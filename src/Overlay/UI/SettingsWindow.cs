@@ -217,10 +217,17 @@ public sealed class SettingsWindow : Window
 
         p.Children.Add(Header("Look"));
         p.Children.Add(Row("Size", SliderBox(0.5, 3, c.Scale, 0.1, v => $"{v:0.0}×", v => c.Scale = v)));
-        p.Children.Add(Row("From the right (px)", NumberBox(c.OffsetX, v => c.OffsetX = v)));
+        p.Children.Add(Check("Mirror (sit at the left end of the taskbar)", c.Flip, v => c.Flip = v));
+        p.Children.Add(Row("From the edge (px)", NumberBox(c.OffsetX, v => c.OffsetX = v)));
         p.Children.Add(Row("Monitors", EditableCombo(MonitorChoices, c.Monitors, v => c.Monitors = v)));
         p.Children.Add(Row("Light color", ColorBox(c.LightColor, Defaults.Cat.LightColor, v => c.LightColor = v)));
         p.Children.Add(Check("Softer color over the desktop and terminals", c.AdaptToBackground, v => c.AdaptToBackground = v));
+
+        p.Children.Add(Header("Kitten"));
+        p.Children.Add(Check("A tiny second cat that keeps this one company", c.Kitten.Enabled, v => c.Kitten.Enabled = v));
+        p.Children.Add(Row("Kitten size", SliderBox(0.4, 1, c.Kitten.Scale, 0.05, v => $"{v:0.00}×", v => c.Kitten.Scale = v)));
+        p.Children.Add(Row("Leaps every (s)", RangeBox(c.Kitten.JumpEverySeconds, v => c.Kitten.JumpEverySeconds = v)));
+        p.Children.Add(Hint("Now and then it leaps over the big cat to its other side."));
         return Scroll(p);
     }
 
@@ -377,6 +384,20 @@ public sealed class SettingsWindow : Window
             }
         };
         return box;
+    }
+
+    /// <summary>A "min to max" pair of whole numbers, saved as [min, max].</summary>
+    private UIElement RangeBox(List<double> value, Action<List<double>> set)
+    {
+        int min = (int)(value.Count > 0 ? value[0] : 0), max = (int)(value.Count > 1 ? value[1] : min);
+        var panel = new StackPanel { Orientation = Orientation.Horizontal };
+        var from = NumberBox(min, v => { min = v; set([min, max]); });
+        var to = NumberBox(max, v => { max = v; set([min, max]); });
+        from.Width = to.Width = 60;
+        panel.Children.Add(from);
+        panel.Children.Add(new TextBlock { Text = "to", Margin = new Thickness(8, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center });
+        panel.Children.Add(to);
+        return panel;
     }
 
     /// <summary>
