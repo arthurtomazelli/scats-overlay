@@ -82,7 +82,8 @@ public sealed class CatConfig
     public List<double> NapMinutes { get; set; } = [2, 8];
     /// <summary>
     /// With a single cat: when a fullscreen app covers its screen, hop to the same spot on another
-    /// screen; if every screen has one, stay on the secondary screen.
+    /// screen; if every screen has one, stay on the secondary screen. With a single screen, run off
+    /// it while the fullscreen app has focus.
     /// </summary>
     public bool AvoidFullscreen { get; set; } = true;
     /// <summary>Switch screens by running: off the left edge of one, in from the right edge of the other.</summary>

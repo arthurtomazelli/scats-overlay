@@ -33,6 +33,7 @@ public sealed class CatWindow : Window
     private long _nextNapAt;
     private bool _fullscreen;   // the focused window is a fullscreen app
     private long _fullscreenNapAt;
+    private MouseClicks? _clicks;
 
     public CatWindow(CatConfig cfg, Color tint, string screenName)
     {
@@ -63,11 +64,15 @@ public sealed class CatWindow : Window
             WindowPlacement.MakeGhost(_hwnd);
             ApplyConfig(_cfg, _tint);
             _timer.Start();
+            // Still click-through: the click goes on to whatever is beneath, the cat just reacts.
+            _clicks = new MouseClicks();
+            _clicks.LeftDown += (x, y) => Dispatcher.BeginInvoke(() => OnClick(x, y));
         };
         SizeChanged += (_, _) => Reposition();
         DpiChanged += (_, _) => ApplyConfig(_cfg, _tint);
         Closed += (_, _) =>
         {
+            _clicks?.Dispose();
             _timer.Stop();
             CompositionTarget.Rendering -= OnRunFrame;
         };
@@ -98,12 +103,23 @@ public sealed class CatWindow : Window
 
     private long FullscreenSettleMs() => _rng.Next(8_000, 15_001);
 
-    /// <summary>Moves the cat to the same spot on another monitor.</summary>
+    /// <summary>True while it has run off its screen (see <see cref="RunAway"/>).</summary>
+    public bool IsAway => _away;
+
+    /// <summary>Moves the cat to the same spot on another monitor, or brings it back if it's away.</summary>
     public void MoveToScreen(string screenName)
     {
         if (_running)
         {
             _runDest = screenName; // picked up when it leaves this screen, or right after arriving
+            return;
+        }
+        if (_away)
+        {
+            _away = false;
+            ScreenName = screenName;
+            if (_cfg.RunBetweenScreens && _hwnd != IntPtr.Zero && IsVisible) StartRun(screenName, entering: true);
+            else Reposition();
             return;
         }
         if (screenName == ScreenName) return;
@@ -113,6 +129,27 @@ public sealed class CatWindow : Window
             return;
         }
         ScreenName = screenName;
+        Reposition();
+    }
+
+    /// <summary>
+    /// Runs off the left edge of its screen and stays out of sight until <see cref="MoveToScreen"/>
+    /// brings it back (it then runs in from the right edge). For when there's no free screen to go to.
+    /// </summary>
+    public void RunAway()
+    {
+        if (_running)
+        {
+            _runDest = null; // leaves the screen and stays out, rather than coming in somewhere
+            return;
+        }
+        if (_away) return;
+        if (_cfg.RunBetweenScreens && _hwnd != IntPtr.Zero && IsVisible)
+        {
+            StartRun(null);
+            return;
+        }
+        _away = true;
         Reposition();
     }
 
@@ -257,6 +294,15 @@ public sealed class CatWindow : Window
         (byte)Math.Round(a.A + (b.A - a.A) * t), (byte)Math.Round(a.R + (b.R - a.R) * t),
         (byte)Math.Round(a.G + (b.G - a.G) * t), (byte)Math.Round(a.B + (b.B - a.B) * t));
 
+    /// <summary>A click on the cat itself (not the bubble room above it) squishes it.</summary>
+    private void OnClick(int x, int y)
+    {
+        if (_hwnd == IntPtr.Zero || _running || _away || !IsVisible || !Native.GetWindowRect(_hwnd, out var r)) return;
+        double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        if (x >= r.Left && x < r.Left + _cat.CatWidth * scale && y >= r.Bottom - _cat.CatHeight * scale && y < r.Bottom)
+            _cat.Squish();
+    }
+
     private bool IsHovered() =>
         _hwnd != IntPtr.Zero && Native.GetCursorPos(out var p) && Native.GetWindowRect(_hwnd, out var r)
         && p.X >= r.Left && p.X < r.Right && p.Y >= r.Top && p.Y < r.Bottom;
@@ -279,6 +325,7 @@ public sealed class CatWindow : Window
     private void Reposition()
     {
         if (_hwnd == IntPtr.Zero || _running) return; // the run positions the window itself
+        if (_away) { WindowPlacement.MoveTo(_hwnd, -32000, -32000); return; }
         var area = Screens.ByName(ScreenName).WorkingArea;
         double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         WindowPlacement.MoveTo(_hwnd, HomeX(area, scale), BottomY(area, scale));
@@ -301,20 +348,35 @@ public sealed class CatWindow : Window
 
     private bool _running;
     private bool _entering; // false: running off the old screen; true: coming in on the new one
-    private string? _runDest;
+    private string? _runDest; // null: run off and stay away
+    private bool _away;     // ran off its screen and is parked out of sight
     private double _runX;   // window x, physical pixels
     private double _runSpeed; // DIPs per second
     private double _strideLeft; // DIPs until the next gallop step
     private readonly Stopwatch _runClock = new();
 
-    /// <summary>Always runs left: off the left edge of the current screen, then in from the right edge of the next.</summary>
-    private void StartRun(string dest)
+    /// <summary>
+    /// Always runs left: off the left edge of the current screen, then in from the right edge of the
+    /// next (<paramref name="dest"/> null: it stays off screen). <paramref name="entering"/> skips
+    /// the first half, coming straight in on <paramref name="dest"/>.
+    /// </summary>
+    private void StartRun(string? dest, bool entering = false)
     {
-        if (!Native.GetWindowRect(_hwnd, out var r)) { ScreenName = dest; Reposition(); return; }
+        if (entering)
+        {
+            _runX = Screens.ByName(dest!).WorkingArea.Right - _cat.RunSpriteLeft * VisualTreeHelper.GetDpi(this).DpiScaleX;
+        }
+        else if (Native.GetWindowRect(_hwnd, out var r)) _runX = r.Left;
+        else
+        {
+            if (dest is null) _away = true;
+            else ScreenName = dest;
+            Reposition();
+            return;
+        }
         _running = true;
-        _entering = false;
+        _entering = entering;
         _runDest = dest;
-        _runX = r.Left;
         _runSpeed = 0;
         _strideLeft = _cat.RunStrideDip;
         _napping = false;
@@ -360,6 +422,12 @@ public sealed class CatWindow : Window
             double spriteRight = _runX + (_cat.RunSpriteLeft + _cat.RunSpriteWidth) * scale;
             if (spriteRight <= area.Left)
             {
+                if (_runDest is null)
+                {
+                    _away = true;
+                    FinishRun();
+                    return;
+                }
                 ScreenName = _runDest ?? ScreenName;
                 area = Screens.ByName(ScreenName).WorkingArea;
                 _runX = area.Right - _cat.RunSpriteLeft * scale;
@@ -386,8 +454,10 @@ public sealed class CatWindow : Window
         _cat.Clip = null;
         _cat.SetRunning(false);
         Reposition();
-        // Asked to go somewhere else mid-run? Head there now.
-        if (_runDest is { } dest && dest != ScreenName) MoveToScreen(dest);
+        if (_away) return;
+        // Asked to go somewhere else (or away) mid-run? Head there now.
+        if (_runDest is null) RunAway();
+        else if (_runDest != ScreenName) MoveToScreen(_runDest);
     }
 
     private static Color Parse(string s, Color fallback)

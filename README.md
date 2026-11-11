@@ -38,7 +38,8 @@ up                 11d 15h
 - Takes random naps; hover the mouse over it to wake it up.
 - Near-white over apps, a softer gray over the desktop and terminals.
 - When a fullscreen app (game, video) covers its screen, it gallops off to the other monitor and naps
-  there while the app has focus, then heads home a minute after you leave it.
+  there while the app has focus, then heads home a minute after you leave it. With a single monitor
+  it runs off the screen instead and comes back a few seconds after you leave the app.
 
 ## Requirements
 

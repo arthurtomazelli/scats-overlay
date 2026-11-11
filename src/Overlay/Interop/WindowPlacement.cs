@@ -56,10 +56,30 @@ internal static class WindowPlacement
         Marshal.StructureToPtr(pos, windowPos, false);
     }
 
+    /// <summary>
+    /// Above every normal app, but at the bottom of the topmost band, so notifications, tray
+    /// flyouts and other always-on-top windows stay over it.
+    /// </summary>
     public static void MakeTopmost(IntPtr hwnd)
     {
         SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, IntPtr.Zero);
-        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        const uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        var lowest = LowestOtherTopmost(hwnd);
+        if (lowest != IntPtr.Zero) SetWindowPos(hwnd, lowest, 0, 0, 0, 0, flags);
+    }
+
+    /// <summary>The last topmost window in z-order other than <paramref name="self"/> (topmost windows come first).</summary>
+    private static IntPtr LowestOtherTopmost(IntPtr self)
+    {
+        IntPtr lowest = IntPtr.Zero;
+        EnumWindows((h, _) =>
+        {
+            if ((GetWindowLongPtr(h, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0) return false;
+            if (h != self) lowest = h;
+            return true;
+        }, IntPtr.Zero);
+        return lowest;
     }
 
     public static void MoveTo(IntPtr hwnd, int x, int y) =>

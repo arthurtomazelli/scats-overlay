@@ -7,6 +7,7 @@ internal static class Native
     public const int GWL_EXSTYLE = -20;
     public const int GWLP_HWNDPARENT = -8;
 
+    public const long WS_EX_TOPMOST = 0x00000008;
     public const long WS_EX_TRANSPARENT = 0x00000020;
     public const long WS_EX_TOOLWINDOW = 0x00000080;
     public const long WS_EX_APPWINDOW = 0x00040000;

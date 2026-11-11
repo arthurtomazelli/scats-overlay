@@ -29,9 +29,11 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
     private string? _catHome;
     private const long ReturnHomeDelayMs = 60_000;
     private long _lastFullscreenFocus; // TickCount64 when a fullscreen app last had focus
+    private long _singleReturnDelayMs = 2_500; // re-rolled within 2-3 s each time a fullscreen app has focus
     // Window events trigger placement checks immediately; the timer is only a safety net.
     private readonly DispatcherTimer _catPlacement = new() { Interval = TimeSpan.FromSeconds(2) };
     private WindowEvents? _windowEvents;
+    private readonly DispatcherTimer _returnCheck = new(); // one-shot, for the single-screen return
 
     // Read by the poll thread; swapped atomically on the UI thread.
     private volatile IReadOnlySet<string> _activeMetrics = new HashSet<string>();
@@ -59,6 +61,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
 
         _catPlacement.Tick += (_, _) => PlaceCat();
         _catPlacement.Start();
+        _returnCheck.Tick += (_, _) => { _returnCheck.Stop(); PlaceCat(); };
         _windowEvents = new WindowEvents(TimeSpan.FromMilliseconds(50));
         _windowEvents.Changed += PlaceCat;
 
@@ -68,7 +71,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
 
     /// <summary>
     /// Keeps a single cat off screens running a fullscreen app: home screen if it's free, else
-    /// another free screen, else the secondary screen.
+    /// another free screen, else the secondary screen. With only one screen it runs off it instead.
     /// </summary>
     private void PlaceCat()
     {
@@ -79,26 +82,49 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
         var busy = FullscreenWindows.Find(bounds);
         // It naps while you're focused on a game or video; switching to another app wakes it.
         bool focusedFullscreen = FullscreenWindows.IsForegroundFullscreen(bounds);
-        if (focusedFullscreen) _lastFullscreenFocus = Environment.TickCount64;
+        if (focusedFullscreen)
+        {
+            _lastFullscreenFocus = Environment.TickCount64;
+            _singleReturnDelayMs = Random.Shared.Next(2_000, 3_001);
+        }
         cat.SetFullscreenActive(focusedFullscreen);
 
-        if (!Cfg.Cat.AvoidFullscreen || screens.Length < 2)
+        if (!Cfg.Cat.AvoidFullscreen)
         {
             cat.MoveToScreen(_catHome);
             return;
         }
 
-        bool Free(System.Windows.Forms.Screen s) => !busy.Contains(s.Bounds);
+        // With one screen, a fullscreen app behind other windows isn't in the way; only the focused one is.
+        bool single = screens.Length < 2;
+        bool Free(System.Windows.Forms.Screen s) => single ? !focusedFullscreen : !busy.Contains(s.Bounds);
 
         var home = Screens.ByName(_catHome);
         var secondary = screens.FirstOrDefault(s => !s.Primary) ?? home;
         var target = Free(home) ? home
-            : screens.FirstOrDefault(s => s.DeviceName != home.DeviceName && Free(s)) ?? secondary;
+            : screens.FirstOrDefault(s => s.DeviceName != home.DeviceName && Free(s)) ?? (single ? null : secondary);
+
+        if (target is null)
+        {
+            cat.RunAway();
+            return;
+        }
 
         // Having moved away for a game/video, it lingers a while after that loses focus before
         // heading home, so it doesn't dash back and forth when you briefly switch apps.
-        bool goingHome = target.DeviceName == home.DeviceName && cat.ScreenName != home.DeviceName;
-        if (goingHome && Environment.TickCount64 - _lastFullscreenFocus < ReturnHomeDelayMs) return;
+        // With one screen it's been out of sight, so it comes back sooner.
+        bool goingHome = target.DeviceName == home.DeviceName && (cat.ScreenName != home.DeviceName || cat.IsAway);
+        long wait = _lastFullscreenFocus + (single ? _singleReturnDelayMs : ReturnHomeDelayMs) - Environment.TickCount64;
+        if (goingHome && wait > 0)
+        {
+            // The 2 s safety timer is too coarse for the short delay: check again right when it's up.
+            if (single && !_returnCheck.IsEnabled)
+            {
+                _returnCheck.Interval = TimeSpan.FromMilliseconds(wait);
+                _returnCheck.Start();
+            }
+            return;
+        }
 
         cat.MoveToScreen(target.DeviceName);
     }
@@ -219,6 +245,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
     {
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _catPlacement.Stop();
+        _returnCheck.Stop();
         _windowEvents?.Dispose();
         _poller?.Dispose();
         _modes?.Dispose();

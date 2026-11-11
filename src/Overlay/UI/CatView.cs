@@ -34,6 +34,24 @@ public sealed class CatView : FrameworkElement
         ".##.#####.##......",
     ];
 
+    // Squished by a click: two rows shorter, a block wider on each side, eyes shut.
+    private static readonly string[] SquishedSilhouette =
+    [
+        "..................",
+        "..................",
+        "#...........#.....",
+        "##.........##.....",
+        "#############.....",
+        "##e#######e##.....",
+        "#############.....",
+        ".###########......",
+        "#############.....",
+        "#############.....",
+        "#############.....",
+        "#############.....",
+        "##.#######.##.....",
+    ];
+
     // Tail poses as (row, col) blocks, base to tip.
     private static readonly (int R, int C)[][] TailPoses =
     [
@@ -273,6 +291,10 @@ public sealed class CatView : FrameworkElement
 
     private bool _asleep;
     private bool _running;
+    // The squish runs on its own clock: the frame rate (8 fps) is too slow for a snappy pop.
+    private const int SquishMs = 150;
+    private bool _squished;
+    private System.Windows.Threading.DispatcherTimer? _unsquish;
     private int _runFrame;
     private readonly List<(double X, double Y, int Age)> _zs = new();
 
@@ -371,6 +393,26 @@ public sealed class CatView : FrameworkElement
         _phrase = null;
         _nextBubble = _rng.Next(40, 120); // a little pause after waking before it "thinks" again
         _zs.Clear();
+    }
+
+    /// <summary>Squashes flat and wide with its eyes shut for a moment, then pops back.</summary>
+    public void Squish()
+    {
+        if (_asleep || _running) return;
+        if (_unsquish is null)
+        {
+            _unsquish = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(SquishMs) };
+            _unsquish.Tick += (_, _) =>
+            {
+                _unsquish.Stop();
+                _squished = false;
+                InvalidateVisual();
+            };
+        }
+        _squished = true;
+        _unsquish.Stop();
+        _unsquish.Start();
+        InvalidateVisual();
     }
 
     /// <summary>Types <paramref name="phrase"/> into the thought bubble right away.</summary>
@@ -484,9 +526,10 @@ public sealed class CatView : FrameworkElement
 
         if (_phrase is { } phrase) DrawBubble(dc, phrase);
 
-        var silhouette = _asleep ? SleepingSilhouette : Silhouette;
+        bool squished = _squished && !_asleep;
+        var silhouette = _asleep ? SleepingSilhouette : squished ? SquishedSilhouette : Silhouette;
         var tail = (_asleep ? SleepingTailPoses : TailPoses)[_tailPose];
-        bool squint = _asleep || _blinkFrames > 0;
+        bool squint = _asleep || squished || _blinkFrames > 0;
         for (int r = 0; r < Rows; r++)
         {
             for (int c = 0; c < Cols; c++)
@@ -498,7 +541,7 @@ public sealed class CatView : FrameworkElement
                     // Fill the eye hole except a slit: thin mid-blink, thinner still when asleep.
                     var brush = Shade(r, c);
                     double s = CellSize;
-                    double slit = Snap(Math.Max(1, s * (_asleep ? 0.15 : 0.3)));
+                    double slit = Snap(Math.Max(1, s * (_asleep || squished ? 0.15 : 0.3)));
                     double y = CellY(r);
                     dc.DrawRectangle(brush, null, new Rect(CellX(c), y, s, (s - slit) / 2));
                     dc.DrawRectangle(brush, null, new Rect(CellX(c), y + (s + slit) / 2, s, (s - slit) / 2));
