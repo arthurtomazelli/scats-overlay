@@ -118,6 +118,8 @@ public sealed class SettingsWindow : Window
     private UIElement WidgetTab()
     {
         var p = Page();
+        p.Children.Add(Check("Cat only", _cfg.CatOnly, v => _cfg.CatOnly = v));
+        p.Children.Add(Hint("Just the cat: no stats, no admin prompt (from the next start), and only CPU load is read. Doesn't need PawnIO."));
         p.Children.Add(Check("Show the widget", _cfg.ShowWidget, v => _cfg.ShowWidget = v));
 
         p.Children.Add(Header("Placement"));

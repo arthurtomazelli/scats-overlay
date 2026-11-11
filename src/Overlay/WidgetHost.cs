@@ -51,7 +51,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
     {
         SyncWindows();
 
-        _modes = new ModeController(this, new NullGameDetector(), Cfg.GameMode.Enabled);
+        _modes = new ModeController(this, new NullGameDetector(), Cfg.GameMode.Enabled && Cfg.WidgetWanted);
 
         if (Cfg.TrayIcon)
             _tray = new TrayIcon(OpenSettings, OpenConfig, _config.Reload, DumpSensors, on => _modes.Preview = on, () => Application.Current.Shutdown());
@@ -158,7 +158,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
         foreach (var w in _widgets) w.ApplyConfig(Cfg);
         foreach (var c in _cats) c.ApplyConfig(Cfg.Cat, CatWindow.TintFor(Cfg));
         foreach (var k in _kittens) k.ApplyConfig(Cfg.Cat);
-        _modes!.SetEnabled(Cfg.GameMode.Enabled);
+        _modes!.SetEnabled(Cfg.GameMode.Enabled && Cfg.WidgetWanted);
     }
 
     private void OnDisplaySettingsChanged(object? sender, EventArgs e) =>
@@ -172,7 +172,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
     /// <summary>Creates/closes windows so there is one per monitor the config asks for.</summary>
     private void SyncWindows()
     {
-        var widgetScreens = Cfg.ShowWidget ? Screens.Resolve(Cfg.Monitors) : [];
+        var widgetScreens = Cfg.WidgetWanted ? Screens.Resolve(Cfg.Monitors) : [];
         var widgetKey = string.Join('|', widgetScreens);
         if (widgetKey != _widgetScreens)
         {
@@ -231,7 +231,8 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
         }
     }
 
-    private IReadOnlyList<string> ShownMetrics() => Mode == DisplayMode.Desktop ? Cfg.Metrics : Cfg.GameMode.Metrics;
+    private IReadOnlyList<string> ShownMetrics() =>
+        !Cfg.WidgetWanted ? [] : Mode == DisplayMode.Desktop ? Cfg.Metrics : Cfg.GameMode.Metrics;
 
     private void RefreshActiveMetrics()
     {

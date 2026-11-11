@@ -84,6 +84,7 @@ The task points at the Release build in this repo. Pass `-ExePath` to point it s
 | Setting | What it does |
 |---|---|
 | `showWidget` | Show the stats widget at all |
+| `catOnly` | Just the cat: no widget, no admin prompt, only CPU load read (no PawnIO needed) |
 | `position`, `offsetX`, `offsetY` | Anchor (`TopLeft` … `Center` … `BottomRight`) and nudge |
 | `monitors` | `"primary"`, `"all"`, or `"1,2"` |
 | `opacity`, `textColor`, `accentColor`, `fontFamily`, `fontSize` | The look |

@@ -25,7 +25,7 @@ internal static class Program
         var config = new ConfigStore(Path.Combine(dir, "config.json"));
 
         bool elevated = IsElevated();
-        if (config.Current.RequireAdmin && !elevated && !args.Contains("--no-elevate") && TryRelaunchElevated(args))
+        if (config.Current.RequireAdmin && !config.Current.CatOnly && !elevated && !args.Contains("--no-elevate") && TryRelaunchElevated(args))
             return 0;
 
         if (args.Contains("--dump"))

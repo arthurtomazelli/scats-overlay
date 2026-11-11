@@ -159,7 +159,8 @@ public sealed class HardwareMonitorService : IDisposable
 
     private void EnableGroups(WidgetConfig config)
     {
-        var all = config.Metrics.Concat(config.GameMode.Metrics).ToHashSet();
+        // With no widget, the cat's mood (CPU load) is all that's read.
+        HashSet<string> all = config.WidgetWanted ? config.Metrics.Concat(config.GameMode.Metrics).ToHashSet() : ["cpu"];
         _computer.IsCpuEnabled = all.Contains("cpu");
         _computer.IsGpuEnabled = all.Contains("gpu") || all.Contains("fans");
         // Never: LHM storage reads SMART every update, which wakes/ticks hard drives. See DiskCounters.

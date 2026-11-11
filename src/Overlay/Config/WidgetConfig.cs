@@ -8,6 +8,15 @@ public sealed class WidgetConfig
 {
     /// <summary>Show the stats widget. Off leaves just the cat (and the tray icon).</summary>
     public bool ShowWidget { get; set; } = true;
+    /// <summary>
+    /// Just the cat: no stats widget, no admin prompt, and only CPU load is read (for the cat's
+    /// mood). Nothing needs PawnIO then. Overrides <see cref="ShowWidget"/> and <see cref="RequireAdmin"/>.
+    /// </summary>
+    public bool CatOnly { get; set; } = false;
+
+    /// <summary>The stats widget is on screen (or would be): shown and not in cat-only mode.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool WidgetWanted => ShowWidget && !CatOnly;
 
     // Placement
     public Position Position { get; set; } = Position.Center;
