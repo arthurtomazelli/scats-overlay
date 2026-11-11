@@ -12,14 +12,17 @@ public sealed class TrayIcon : IDisposable
     private readonly NotifyIcon _icon;
     private readonly Icon _image;
 
-    public TrayIcon(Action openConfig, Action reload, Action dumpSensors, Action<bool> previewGameOverlay, Action exit)
+    public TrayIcon(Action openSettings, Action openConfig, Action reload, Action dumpSensors, Action<bool> previewGameOverlay, Action exit)
     {
         _image = DrawIcon();
         var preview = new ToolStripMenuItem("Preview game overlay") { CheckOnClick = true };
         preview.CheckedChanged += (_, _) => previewGameOverlay(preview.Checked);
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Edit config", null, (_, _) => openConfig());
+        var settings = new ToolStripMenuItem("Settings...", null, (_, _) => openSettings());
+        settings.Font = new Font(settings.Font, FontStyle.Bold); // the double-click action
+        menu.Items.Add(settings);
+        menu.Items.Add("Edit config.json", null, (_, _) => openConfig());
         menu.Items.Add("Reload config", null, (_, _) => reload());
         menu.Items.Add("Dump sensors to file", null, (_, _) => dumpSensors());
         menu.Items.Add(preview);
@@ -27,6 +30,7 @@ public sealed class TrayIcon : IDisposable
         menu.Items.Add("Exit", null, (_, _) => exit());
 
         _icon = new NotifyIcon { Icon = _image, Text = "Hardware widget", ContextMenuStrip = menu, Visible = true };
+        _icon.DoubleClick += (_, _) => openSettings();
     }
 
     public void ShowMessage(string text) => _icon.ShowBalloonTip(3000, "Hardware widget", text, ToolTipIcon.None);

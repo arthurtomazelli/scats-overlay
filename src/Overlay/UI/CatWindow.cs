@@ -64,9 +64,6 @@ public sealed class CatWindow : Window
             WindowPlacement.MakeGhost(_hwnd);
             ApplyConfig(_cfg, _tint);
             _timer.Start();
-            // Still click-through: the click goes on to whatever is beneath, the cat just reacts.
-            _clicks = new MouseClicks();
-            _clicks.LeftDown += (x, y) => Dispatcher.BeginInvoke(() => OnClick(x, y));
         };
         SizeChanged += (_, _) => Reposition();
         DpiChanged += (_, _) => ApplyConfig(_cfg, _tint);
@@ -75,6 +72,7 @@ public sealed class CatWindow : Window
             _clicks?.Dispose();
             _timer.Stop();
             CompositionTarget.Rendering -= OnRunFrame;
+            CompositionTarget.Rendering -= OnPeekFrame;
         };
     }
 
@@ -128,6 +126,7 @@ public sealed class CatWindow : Window
             StartRun(screenName);
             return;
         }
+        if (IsPeeking) EndPeekNow();
         ScreenName = screenName;
         Reposition();
     }
@@ -149,6 +148,7 @@ public sealed class CatWindow : Window
             StartRun(null);
             return;
         }
+        if (IsPeeking) EndPeekNow();
         _away = true;
         Reposition();
     }
@@ -177,6 +177,17 @@ public sealed class CatWindow : Window
         // Start from the soft tint; UpdateTone moves to the right color within a couple of seconds.
         _currentColor = _targetColor = tint;
         _cat.Configure(cfg, VisualTreeHelper.GetDpi(this).PixelsPerDip, tint);
+        // Still click-through: the click goes on to whatever is beneath, the cat just reacts.
+        if (cfg.ClickReactions && _clicks is null && _hwnd != IntPtr.Zero)
+        {
+            _clicks = new MouseClicks();
+            _clicks.LeftDown += (x, y) => Dispatcher.BeginInvoke(() => OnClick(x, y));
+        }
+        else if (!cfg.ClickReactions && _clicks is not null)
+        {
+            _clicks.Dispose();
+            _clicks = null;
+        }
         ApplyZOrder();
         Reposition();
     }
@@ -201,14 +212,20 @@ public sealed class CatWindow : Window
 
     public void Pause(bool paused)
     {
-        if (paused) { _timer.Stop(); Hide(); }
+        if (paused)
+        {
+            if (IsPeeking) EndPeekNow();
+            _timer.Stop();
+            Hide();
+        }
         else { Show(); ApplyZOrder(); _timer.Start(); }
     }
 
     private void Tick()
     {
         if (_running) return; // the run timer animates it meanwhile
-        if (_frames % 4 == 0) UpdateNap();
+        if (_frames % 2 == 0) UpdatePeek();
+        if (_frames % 4 == 0 && !IsPeeking) UpdateNap();
         UpdateTone();
         _cat.Step();
         // Other topmost windows (and Explorer restarts) can push us down; quietly climb back.
@@ -297,7 +314,7 @@ public sealed class CatWindow : Window
     /// <summary>A click on the cat itself (not the bubble room above it) squishes it.</summary>
     private void OnClick(int x, int y)
     {
-        if (_hwnd == IntPtr.Zero || _running || _away || !IsVisible || !Native.GetWindowRect(_hwnd, out var r)) return;
+        if (_hwnd == IntPtr.Zero || _running || _away || IsPeeking || !IsVisible || !Native.GetWindowRect(_hwnd, out var r)) return;
         double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         if (x >= r.Left && x < r.Left + _cat.CatWidth * scale && y >= r.Bottom - _cat.CatHeight * scale && y < r.Bottom)
             _cat.Squish();
@@ -326,6 +343,7 @@ public sealed class CatWindow : Window
     {
         if (_hwnd == IntPtr.Zero || _running) return; // the run positions the window itself
         if (_away) { WindowPlacement.MoveTo(_hwnd, -32000, -32000); return; }
+        if (IsPeeking) return; // OnPeekFrame places it
         var area = Screens.ByName(ScreenName).WorkingArea;
         double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         WindowPlacement.MoveTo(_hwnd, HomeX(area, scale), BottomY(area, scale));
@@ -362,6 +380,7 @@ public sealed class CatWindow : Window
     /// </summary>
     private void StartRun(string? dest, bool entering = false)
     {
+        if (IsPeeking) EndPeekNow();
         if (entering)
         {
             _runX = Screens.ByName(dest!).WorkingArea.Right - _cat.RunSpriteLeft * VisualTreeHelper.GetDpi(this).DpiScaleX;
@@ -458,6 +477,323 @@ public sealed class CatWindow : Window
         // Asked to go somewhere else (or away) mid-run? Head there now.
         if (_runDest is null) RunAway();
         else if (_runDest != ScreenName) MoveToScreen(_runDest);
+    }
+
+    // --- peeking over notifications -------------------------------------------------------
+    //
+    // Covered by a popup for a moment, the cat rises behind it until its head shows over the top
+    // edge, then rests its paws there. It rides the edge if the popup slides down, and keeps going
+    // down on its own if the popup vanishes on the way (or leaves any other way). Down on the
+    // taskbar it stays in the pose a moment after the popup is gone, then gets up and sits.
+
+    private enum PeekPhase { None, Rising, Up, Landed, Falling, GettingUp }
+
+    private const long PeekDelayMs = 1_000;      // covered this long before it peeks: a beat to notice
+    private const double PeekRiseSeconds = 0.18; // pops up from behind the edge
+    private const double FallGravityDip = 2600;  // DIPs/s² while dropping to the taskbar
+    private const long LandedPauseMs = CatView.SquishMs; // down on the taskbar: gets up as soon as its touchdown squish ends
+    private const double GetUpSeconds = 0.2;     // from peeking over the taskbar up into its seat
+
+    private PeekPhase _peek;
+    private long _landedAt;       // landed: TickCount64 when the card last moved (or left)
+    private double _landedEdge;   // landed: the card's top when last seen; MaxValue once it has left
+    private IntPtr _ignoredPopup; // got up from peeking over this one; leave it be while it stays
+    private bool IsPeeking => _peek != PeekPhase.None;
+    private IntPtr _popupHwnd;    // what covers it (or what it peeks over)
+    private (int L, int T, int R, int B)? _cardInsets; // popup window rect -> its visible card; null = still measuring
+    private long _coveredSince;   // TickCount64 when the current popup first covered it
+    private double _peekLift;     // rising: 0 = hidden behind the edge, 1 = all the way up
+    private int _peekX;           // window x while peeking, physical pixels
+    private double _peekY;        // window y while peeking or falling, physical pixels
+    private double _edge;         // screen y below which the body is hidden (the card's top edge)
+    private double _fallSpeed;    // DIPs per second
+    private double _getUpT;       // 0..1 through getting up
+    private double _cardSpeed;    // how fast the card's edge was moving down, DIPs per second
+    private readonly Stopwatch _peekClock = new();
+
+    /// <summary>
+    /// Watches for a notification or flyout covering the cat's spot, and starts peeking once that
+    /// has lasted <see cref="PeekDelayMs"/>. Once peeking, <see cref="OnPeekFrame"/> takes over.
+    /// </summary>
+    private void UpdatePeek()
+    {
+        bool allowed = _cfg.PeekOverPopups && _cfg.Topmost && !_running && !_away && IsVisible
+            && !_cfg.Pose.Equals("sleep", StringComparison.OrdinalIgnoreCase);
+        if (!allowed)
+        {
+            if (IsPeeking) EndPeekNow();
+            _popupHwnd = IntPtr.Zero;
+            return;
+        }
+        if (IsPeeking) return;
+
+        if (!FindPopup(out var hwnd, out var bounds, out var body) || hwnd != _ignoredPopup) _ignoredPopup = IntPtr.Zero;
+        if (hwnd == IntPtr.Zero || hwnd == _ignoredPopup)
+        {
+            _popupHwnd = IntPtr.Zero;
+            return;
+        }
+        long now = Environment.TickCount64;
+        if (hwnd != _popupHwnd)
+        {
+            _popupHwnd = hwnd;
+            _coveredSince = now;
+            _cardInsets = null;
+            MeasureCard(hwnd, bounds);
+            return;
+        }
+        if (_cardInsets is not { } inset) return; // still measuring
+
+        // Only the card counts: a toast's transparent margin over the cat doesn't, nor does
+        // something too big to be a popup. The delay runs from when the card itself covers it.
+        var card = Card(bounds, inset);
+        if (!card.IntersectsWith(body) || !PopupWindows.IsPopupSized(card, Screens.ByName(ScreenName).Bounds)
+            || PeekHeight(card.Top) <= 0) // low enough that its head is already above it
+            _coveredSince = now;
+        else if (now - _coveredSince >= PeekDelayMs)
+            StartPeek();
+    }
+
+    /// <summary>A popup over the cat's usual spot (<paramref name="body"/>).</summary>
+    private bool FindPopup(out IntPtr hwnd, out System.Drawing.Rectangle bounds, out System.Drawing.Rectangle body)
+    {
+        hwnd = IntPtr.Zero;
+        bounds = body = System.Drawing.Rectangle.Empty;
+        if (_hwnd == IntPtr.Zero) return false;
+        var screen = Screens.ByName(ScreenName);
+        var area = screen.WorkingArea;
+        double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        int height = (int)Math.Round(_cat.CatHeight * scale);
+        body = new System.Drawing.Rectangle(
+            HomeX(area, scale) + (int)Math.Round(_cat.BodyLeft * scale), area.Bottom - height,
+            (int)Math.Round(_cat.BodyWidth * scale), height);
+        hwnd = PopupWindows.Covering(body, _hwnd, out bounds);
+        return hwnd != IntPtr.Zero;
+    }
+
+    /// <summary>Finds the popup's visible card in the background (it takes a moment), as insets from its window.</summary>
+    private void MeasureCard(IntPtr hwnd, System.Drawing.Rectangle bounds)
+    {
+        Task.Run(() => PopupWindows.VisibleBounds(hwnd, bounds)).ContinueWith(t => Dispatcher.BeginInvoke(() =>
+        {
+            if (hwnd != _popupHwnd) return;
+            var v = t.Result;
+            _cardInsets = (v.Left - bounds.Left, v.Top - bounds.Top, bounds.Right - v.Right, bounds.Bottom - v.Bottom);
+            Log.Info($"Popup over the cat: {Native.ClassNameOf(hwnd)} window {bounds}, card {v}");
+        }), TaskScheduler.Default);
+    }
+
+    private static System.Drawing.Rectangle Card(System.Drawing.Rectangle window, (int L, int T, int R, int B) inset) =>
+        System.Drawing.Rectangle.FromLTRB(window.Left + inset.L, window.Top + inset.T, window.Right - inset.R, window.Bottom - inset.B);
+
+    /// <summary>Where the popup's card is now, or null once it's gone (hidden, closed, cloaked, faded out).</summary>
+    private System.Drawing.Rectangle? CurrentCard() =>
+        _cardInsets is { } inset && PopupWindows.IsShowing(_popupHwnd, out var bounds) ? Card(bounds, inset) : null;
+
+    private void StartPeek()
+    {
+        if (CurrentCard() is not { } card) return;
+        double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        var area = Screens.ByName(ScreenName).WorkingArea;
+        double px = _cat.BlockSize * scale;
+        double bodyOff = _cat.BodyLeft * scale, bodyW = _cat.BodyWidth * scale;
+        // Slid sideways as needed so it peeks over the card rather than past its side.
+        double minX = card.Left + px - bodyOff, maxX = card.Right - px - bodyW - bodyOff;
+        _peekX = (int)Math.Round(maxX < minX ? (card.Left + card.Right - bodyW) / 2.0 - bodyOff : Math.Clamp(HomeX(area, scale), minX, maxX));
+
+        _peek = PeekPhase.Rising;
+        _peekLift = 0;
+        _cardSpeed = 0;
+        // Something showed up: it wakes from a nap to have a look.
+        _napping = false;
+        _nextNapAt = Environment.TickCount64 + RandomMs(_cfg.AwakeMinutes, 3, 12);
+        _cat.SetAsleep(false);
+        _cat.SetPeeking(true);
+        _peekClock.Restart();
+        CompositionTarget.Rendering += OnPeekFrame;
+    }
+
+    /// <summary>Every displayed frame while peeking: follows the card, or drops when it's gone.</summary>
+    private void OnPeekFrame(object? sender, EventArgs e)
+    {
+        double dt = Math.Min(0.05, _peekClock.Elapsed.TotalSeconds);
+        _peekClock.Restart();
+        double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        var area = Screens.ByName(ScreenName).WorkingArea;
+        double px = _cat.BlockSize * scale;
+        double homeY = BottomY(area, scale);
+        // The floor: still peeking, paws resting on the taskbar, the rest of it behind it.
+        double floorY = area.Bottom - (_cat.GridTop + (CatView.PeekEdgeRow + 1) * _cat.BlockSize) * scale;
+
+        if (_peek == PeekPhase.GettingUp)
+        {
+            GetUp(dt, scale, area, homeY, floorY);
+            return;
+        }
+        if (_peek == PeekPhase.Falling)
+        {
+            Fall(dt, scale, area, floorY);
+            return;
+        }
+
+        long now = Environment.TickCount64;
+        double centerX = _peekX + (_cat.BodyLeft + _cat.BodyWidth / 2) * scale;
+        var current = CurrentCard();
+        bool gone = current is not { } c || centerX < c.Left || centerX > c.Right;
+        bool slidAway = current is { } below && below.Top >= area.Bottom; // down behind the taskbar
+        if (gone || slidAway)
+        {
+            // Down on the taskbar already (or the card slid out of sight under it): it stays put
+            // a moment after the card has gone, then gets up.
+            if (_peek == PeekPhase.Landed || slidAway)
+            {
+                if (_peek != PeekPhase.Landed) Land(now, floorY, area, scale);
+                if (_landedEdge != double.MaxValue)
+                {
+                    _landedEdge = double.MaxValue;
+                    _landedAt = now; // the moment starts when the card has left
+                }
+                if (now - _landedAt >= LandedPauseMs) StartGetUp();
+                return;
+            }
+            StartFall(); // let go and drop
+            return;
+        }
+        var card = current!.Value;
+        if (dt > 0 && _peek != PeekPhase.Rising) _cardSpeed = (card.Top - _edge) / scale / dt;
+        _edge = card.Top;
+
+        if (_peek == PeekPhase.Rising)
+        {
+            _peekLift = Math.Min(1, _peekLift + dt / PeekRiseSeconds);
+            if (_peekLift >= 1)
+            {
+                _peek = PeekPhase.Up;
+                _cat.SetPeekPaws(true); // up: now it rests its paws on the edge
+            }
+        }
+
+        // Up: the paw row's bottom on the edge. Down: even the ear tips are below it. It rides
+        // the edge down, but never below the floor.
+        double upY = _edge - (_cat.GridTop + (CatView.PeekEdgeRow + 1) * _cat.BlockSize) * scale;
+        double downY = upY + (CatView.PeekEdgeRow + 1) * px;
+        double eased = 1 - (1 - _peekLift) * (1 - _peekLift);
+        _peekY = Math.Min(downY + (upY - downY) * eased, floorY);
+
+        // Ridden down to the taskbar, it stays in the peek pose while the card slides on past.
+        // If the card stops there instead of leaving, it gets up a moment after it stops.
+        if (_peek != PeekPhase.Rising)
+        {
+            if (upY < floorY) _peek = PeekPhase.Up;
+            else if (_peek != PeekPhase.Landed) Land(now, floorY, area, scale);
+            else if (card.Top != _landedEdge)
+            {
+                _landedEdge = card.Top; // still moving
+                _landedAt = now;
+            }
+            else if (now - _landedAt >= LandedPauseMs)
+            {
+                _ignoredPopup = _popupHwnd; // don't peek right back at it while it stays put
+                StartGetUp();
+                return;
+            }
+            if (_peek == PeekPhase.Landed) return;
+        }
+        Place(scale);
+    }
+
+    /// <summary>Down on the floor: paws on the taskbar, everything below them hidden behind it.</summary>
+    private void Land(long now, double floorY, System.Drawing.Rectangle area, double scale)
+    {
+        _peek = PeekPhase.Landed;
+        _landedAt = now;
+        _landedEdge = double.NaN;
+        _peekY = floorY;
+        _edge = area.Bottom;
+        Place(scale);
+        _cat.Squish(); // touchdown
+    }
+
+    /// <summary>Gets up from the floor: the whole cat rises from behind the taskbar into its seat.</summary>
+    private void StartGetUp()
+    {
+        _peek = PeekPhase.GettingUp;
+        _getUpT = 0;
+        _cat.Unsquish(); // the touchdown squish is over: up it gets
+        _cat.SetPeeking(false);
+    }
+
+    private void GetUp(double dt, double scale, System.Drawing.Rectangle area, double homeY, double floorY)
+    {
+        _getUpT = Math.Min(1, _getUpT + dt / GetUpSeconds);
+        double eased = 1 - (1 - _getUpT) * (1 - _getUpT);
+        _peekY = floorY + (homeY - floorY) * eased;
+        _edge = area.Bottom;
+        if (_getUpT >= 1)
+        {
+            EndPeekNow();
+            return;
+        }
+        Place(scale);
+    }
+
+    /// <summary>
+    /// How far (DIPs) above its seat it would be, peeking over an edge at screen y
+    /// <paramref name="edge"/>. 0 or less: sitting, its head is above that edge already.
+    /// </summary>
+    private double PeekHeight(double edge)
+    {
+        double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        double pawsBottom = BottomY(Screens.ByName(ScreenName).WorkingArea, scale)
+            + (_cat.GridTop + (CatView.PeekEdgeRow + 1) * _cat.BlockSize) * scale;
+        return (pawsBottom - edge) / scale;
+    }
+
+    /// <summary>
+    /// The card left before it got down to the taskbar (popups often vanish mid-slide): it keeps
+    /// going down on its own, still in the peek pose, from the card's speed.
+    /// </summary>
+    private void StartFall()
+    {
+        _peek = PeekPhase.Falling;
+        _fallSpeed = Math.Max(0, _cardSpeed);
+    }
+
+    /// <summary>Down to the floor, speeding up as it goes; then a moment there and it gets up.</summary>
+    private void Fall(double dt, double scale, System.Drawing.Rectangle area, double floorY)
+    {
+        _fallSpeed += FallGravityDip * dt;
+        _peekY = Math.Min(floorY, _peekY + _fallSpeed * dt * scale);
+        // Nothing to hide behind any more: the edge just follows its paws.
+        _edge = _peekY + (_cat.GridTop + (CatView.PeekEdgeRow + 1) * _cat.BlockSize) * scale;
+        if (_peekY >= floorY)
+        {
+            Land(Environment.TickCount64, floorY, area, scale);
+            _landedEdge = double.MaxValue; // the card is gone: the moment starts now
+            return;
+        }
+        Place(scale);
+    }
+
+    /// <summary>Moves the window to the peek position and hides everything below the edge.</summary>
+    private void Place(double scale)
+    {
+        int y = (int)Math.Round(_peekY);
+        WindowPlacement.MoveTo(_hwnd, _peekX, y);
+        _cat.Clip = new RectangleGeometry(new Rect(0, 0, Math.Max(0, ActualWidth), Math.Max(0, (_edge - y) / scale)));
+    }
+
+    /// <summary>Back to sitting in its usual spot, right away.</summary>
+    private void EndPeekNow()
+    {
+        if (IsPeeking) CompositionTarget.Rendering -= OnPeekFrame;
+        _peek = PeekPhase.None;
+        _peekClock.Stop();
+        _popupHwnd = IntPtr.Zero;
+        _cardInsets = null;
+        _cat.Clip = null;
+        _cat.SetPeeking(false);
+        Reposition();
     }
 
     private static Color Parse(string s, Color fallback)

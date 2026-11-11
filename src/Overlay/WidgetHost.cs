@@ -24,6 +24,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
     private readonly List<CatWindow> _cats = [];
     private SensorPoller? _poller;
     private TrayIcon? _tray;
+    private SettingsWindow? _settings;
     private ModeController? _modes;
     private string _widgetScreens = "", _catScreens = "";
     private string? _catHome;
@@ -52,7 +53,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
         _modes = new ModeController(this, new NullGameDetector(), Cfg.GameMode.Enabled);
 
         if (Cfg.TrayIcon)
-            _tray = new TrayIcon(OpenConfig, _config.Reload, DumpSensors, on => _modes.Preview = on, () => Application.Current.Shutdown());
+            _tray = new TrayIcon(OpenSettings, OpenConfig, _config.Reload, DumpSensors, on => _modes.Preview = on, () => Application.Current.Shutdown());
 
         var dispatcher = Application.Current.Dispatcher;
         _config.Changed += () => dispatcher.BeginInvoke(OnConfigChanged);
@@ -169,7 +170,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
     /// <summary>Creates/closes windows so there is one per monitor the config asks for.</summary>
     private void SyncWindows()
     {
-        var widgetScreens = Screens.Resolve(Cfg.Monitors);
+        var widgetScreens = Cfg.ShowWidget ? Screens.Resolve(Cfg.Monitors) : [];
         var widgetKey = string.Join('|', widgetScreens);
         if (widgetKey != _widgetScreens)
         {
@@ -177,7 +178,7 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
             foreach (var w in _widgets) w.Close();
             _widgets.Clear();
             var primary = System.Windows.Forms.Screen.PrimaryScreen!.DeviceName;
-            var overlayHost = widgetScreens.Contains(primary) ? primary : widgetScreens[0];
+            var overlayHost = widgetScreens.Contains(primary) ? primary : widgetScreens.FirstOrDefault();
             foreach (var name in widgetScreens)
             {
                 var w = new MainWindow(Cfg, name, hostsOverlay: name == overlayHost);
@@ -215,6 +216,18 @@ internal sealed class WidgetHost : IWidgetSurface, IDisposable
         var set = ShownMetrics().ToHashSet();
         if (_cats.Count > 0 && Cfg.Cat.Moods) set.Add("cpu"); // the cat's mood follows CPU load
         _activeMetrics = set;
+    }
+
+    private void OpenSettings()
+    {
+        if (_settings is null)
+        {
+            _settings = new SettingsWindow(_config, OpenConfig);
+            _settings.Closed += (_, _) => _settings = null;
+            _settings.Show();
+        }
+        if (_settings.WindowState == WindowState.Minimized) _settings.WindowState = WindowState.Normal;
+        _settings.Activate();
     }
 
     private void OpenConfig()

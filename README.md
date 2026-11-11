@@ -40,6 +40,8 @@ up                 11d 15h
 - When a fullscreen app (game, video) covers its screen, it gallops off to the other monitor and naps
   there while the app has focus, then heads home a minute after you leave it. With a single monitor
   it runs off the screen instead and comes back a few seconds after you leave the app.
+- When a notification or tray flyout covers it, it peeks over the top edge with its paws on it,
+  rides it down if it slides away, and gets back up on the taskbar once it's gone.
 
 ## Requirements
 
@@ -59,8 +61,9 @@ dotnet build -c Release
 .\bin\Release\net8.0-windows\Overlay.exe --dump        # write every sensor to sensors.txt
 ```
 
-The tray icon is the only way to interact with it (it's click-through): edit/reload config, dump
-sensors, preview the game overlay, exit.
+The tray icon is the only way to interact with it (it's click-through). Double-click it (or pick
+**Settings...**) for a settings window where everything can be changed or switched off, applied
+live. The menu also has edit/reload config.json, dump sensors, preview the game overlay, exit.
 
 ## Start with Windows
 
@@ -77,6 +80,7 @@ The task points at the Release build in this repo. Pass `-ExePath` to point it s
 
 | Setting | What it does |
 |---|---|
+| `showWidget` | Show the stats widget at all |
 | `position`, `offsetX`, `offsetY` | Anchor (`TopLeft` … `Center` … `BottomRight`) and nudge |
 | `monitors` | `"primary"`, `"all"`, or `"1,2"` |
 | `opacity`, `textColor`, `accentColor`, `fontFamily`, `fontSize` | The look |
@@ -86,6 +90,8 @@ The task points at the Release build in this repo. Pass `-ExePath` to point it s
 | `cat.pose` | `"auto"` (random naps), `"sit"`, or `"sleep"` |
 | `cat.awakeMinutes`, `cat.napMinutes` | Nap timing ranges `[min, max]` |
 | `cat.avoidFullscreen`, `cat.runBetweenScreens` | Screen hopping around fullscreen apps |
+| `cat.thoughts`, `cat.clickReactions`, `cat.moods` | Thought bubble, squish on click, CPU-driven mood |
+| `cat.peekOverPopups` | Peek over notifications and flyouts that cover it |
 
 ## Project layout
 

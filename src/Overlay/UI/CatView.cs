@@ -52,6 +52,46 @@ public sealed class CatView : FrameworkElement
         "##.#######.##.....",
     ];
 
+    // Peeking over the top edge of a notification: head up, paws resting on the edge (row
+    // PeekEdgeRow), the rest hidden behind it.
+    private static readonly string[] PeekingSilhouette =
+    [
+        ".#.........#......",
+        ".##.......##......",
+        ".###########......",
+        ".###########......",
+        ".##e#####e##......",
+        ".###########......",
+        "..##.....##.......",
+        "..................",
+        "..................",
+        "..................",
+        "..................",
+        "..................",
+        "..................",
+    ];
+
+    // The peeking pose squished as it touches down: a row shorter, wider, paws spread, eyes shut.
+    private static readonly string[] SquishedPeekingSilhouette =
+    [
+        "..................",
+        "#...........#.....",
+        "##.........##.....",
+        "#############.....",
+        "##e#######e##.....",
+        "#############.....",
+        ".##.......##......",
+        "..................",
+        "..................",
+        "..................",
+        "..................",
+        "..................",
+        "..................",
+    ];
+
+    /// <summary>The paw row of the peeking pose, which rests on the edge it peeks over.</summary>
+    public const int PeekEdgeRow = 6;
+
     // Tail poses as (row, col) blocks, base to tip.
     private static readonly (int R, int C)[][] TailPoses =
     [
@@ -282,7 +322,6 @@ public sealed class CatView : FrameworkElement
 
     // Bubble geometry, derived in Configure.
     private double _fontSize, _charW, _line, _pad, _bubbleH, _top, _width;
-
     private Mood _mood = Mood.Idle;
     private long _frame;
     private int _blinkFrames, _nextBlink = 30;
@@ -291,14 +330,17 @@ public sealed class CatView : FrameworkElement
 
     private bool _asleep;
     private bool _running;
+    private bool _peeking;
+    private bool _peekPaws;
     // The squish runs on its own clock: the frame rate (8 fps) is too slow for a snappy pop.
-    private const int SquishMs = 150;
+    public const int SquishMs = 150;
     private bool _squished;
     private System.Windows.Threading.DispatcherTimer? _unsquish;
     private int _runFrame;
     private readonly List<(double X, double Y, int Age)> _zs = new();
 
     // Thought bubble state: hidden (counting down) → typing → holding → fading.
+    private bool _thoughts = true;
     private IReadOnlyList<string> _livePhrases = [];
     private string? _phrase;
     private int _typed, _holdFrames, _nextBubble = 24;
@@ -327,6 +369,38 @@ public sealed class CatView : FrameworkElement
     /// </summary>
     public double RunStrideDip => _px * 6;
 
+    /// <summary>Size of one block, in DIPs.</summary>
+    public double BlockSize => _px;
+
+    /// <summary>Top of the cat's grid inside the view (below the bubble room), in DIPs.</summary>
+    public double GridTop => _top;
+
+    /// <summary>Horizontal extent of the sitting body (ears to flanks, no tail) inside the view, in DIPs.</summary>
+    public double BodyLeft => LeftMargin + _px;
+    public double BodyWidth => 11 * _px;
+
+    /// <summary>
+    /// Switches to the peeking pose (and drops the bubble/z's), or back. It comes up without its
+    /// paws, which would look like they pass through the edge; <see cref="SetPeekPaws"/> puts them
+    /// on the edge once it's up.
+    /// </summary>
+    public void SetPeeking(bool peeking)
+    {
+        if (peeking == _peeking) return;
+        _peeking = peeking;
+        _peekPaws = false;
+        _phrase = null;
+        _nextBubble = _rng.Next(40, 120); // settle back in before it "thinks" again
+        _zs.Clear();
+        InvalidateVisual();
+    }
+
+    public void SetPeekPaws(bool paws)
+    {
+        if (paws == _peekPaws) return;
+        _peekPaws = paws;
+        InvalidateVisual();
+    }
     /// <summary>Switches to the running sprite (and drops the bubble/z's), or back.</summary>
     public void SetRunning(bool running)
     {
@@ -350,6 +424,8 @@ public sealed class CatView : FrameworkElement
     public void Configure(CatConfig cfg, double pixelsPerDip, Color tint)
     {
         _pixelsPerDip = pixelsPerDip;
+        _thoughts = cfg.Thoughts;
+        if (!_thoughts) _phrase = null;
         _px = Snap(BasePixelDip * Math.Clamp(cfg.Scale, 0.4, 6));
         _sleepPx = Snap(_px * SleepScale);
 
@@ -415,9 +491,19 @@ public sealed class CatView : FrameworkElement
         InvalidateVisual();
     }
 
+    /// <summary>Ends a squish now, for when what comes next shouldn't wait on its timer.</summary>
+    public void Unsquish()
+    {
+        _unsquish?.Stop();
+        if (!_squished) return;
+        _squished = false;
+        InvalidateVisual();
+    }
+
     /// <summary>Types <paramref name="phrase"/> into the thought bubble right away.</summary>
     public void Say(string phrase)
     {
+        if (!_thoughts) return;
         _phrase = phrase.Length > MaxBubbleChars ? phrase[..MaxBubbleChars] : phrase;
         _typed = 0;
         _holdFrames = _rng.Next(16, 24);
@@ -477,7 +563,7 @@ public sealed class CatView : FrameworkElement
             _nextScan = _rng.Next(60, 140);
         }
 
-        if (!_asleep) StepBubble();
+        if (!_asleep && !_peeking && _thoughts) StepBubble();
         InvalidateVisual();
     }
 
@@ -527,14 +613,17 @@ public sealed class CatView : FrameworkElement
         if (_phrase is { } phrase) DrawBubble(dc, phrase);
 
         bool squished = _squished && !_asleep;
-        var silhouette = _asleep ? SleepingSilhouette : squished ? SquishedSilhouette : Silhouette;
-        var tail = (_asleep ? SleepingTailPoses : TailPoses)[_tailPose];
+        var silhouette = _peeking ? (squished ? SquishedPeekingSilhouette : PeekingSilhouette)
+            : _asleep ? SleepingSilhouette : squished ? SquishedSilhouette : Silhouette;
+        // Peeking, the tail is hidden behind whatever it peeks over.
+        (int R, int C)[] tail = _peeking ? [] : (_asleep ? SleepingTailPoses : TailPoses)[_tailPose];
         bool squint = _asleep || squished || _blinkFrames > 0;
         for (int r = 0; r < Rows; r++)
         {
             for (int c = 0; c < Cols; c++)
             {
                 char cell = silhouette[r][c];
+                if (_peeking && r == PeekEdgeRow && !_peekPaws) continue;
                 if (cell == '#') Block(dc, r, c);
                 else if (cell == 'e' && squint)
                 {

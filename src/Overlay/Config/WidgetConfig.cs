@@ -6,6 +6,9 @@ public enum Position { TopLeft, TopCenter, TopRight, CenterLeft, Center, CenterR
 /// <summary>Everything in config.json. Edits are picked up live (see <see cref="ConfigStore"/>).</summary>
 public sealed class WidgetConfig
 {
+    /// <summary>Show the stats widget. Off leaves just the cat (and the tray icon).</summary>
+    public bool ShowWidget { get; set; } = true;
+
     // Placement
     public Position Position { get; set; } = Position.Center;
     public int OffsetX { get; set; } = 0;
@@ -90,6 +93,12 @@ public sealed class CatConfig
     public bool RunBetweenScreens { get; set; } = true;
     /// <summary>React to CPU load: calmer tail when idle, livelier tail and shimmer when busy.</summary>
     public bool Moods { get; set; } = true;
+    /// <summary>Now and then types a little thought (or a live stat) into a bubble.</summary>
+    public bool Thoughts { get; set; } = true;
+    /// <summary>Squish when clicked. Off also removes the mouse hook that notices the clicks.</summary>
+    public bool ClickReactions { get; set; } = true;
+    /// <summary>When a notification or flyout covers it, peek over its top edge (needs <see cref="Topmost"/>).</summary>
+    public bool PeekOverPopups { get; set; } = true;
 }
 
 /// <summary>Values at or past these get the accent color.</summary>

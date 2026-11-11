@@ -57,6 +57,17 @@ public sealed class ConfigStore : IDisposable
         }
     }
 
+    /// <summary>Writes <paramref name="config"/> to disk; the watcher then applies it like a hand edit.</summary>
+    public void Save(WidgetConfig config)
+    {
+        try { File.WriteAllText(FilePath, JsonSerializer.Serialize(config, Json)); }
+        catch (Exception ex) { Log.Error("Could not save config", ex); }
+    }
+
+    /// <summary>A deep copy of <see cref="Current"/> that is safe to edit.</summary>
+    public WidgetConfig CloneCurrent() =>
+        JsonSerializer.Deserialize<WidgetConfig>(JsonSerializer.Serialize(Current, Json), Json) ?? new WidgetConfig();
+
     private WidgetConfig LoadOrCreate()
     {
         if (!File.Exists(FilePath))
