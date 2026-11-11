@@ -226,7 +226,8 @@ public sealed class CatWindow : Window
         if (_running) return; // the run timer animates it meanwhile
         if (_frames % 2 == 0) UpdatePeek();
         if (_frames % 4 == 0 && !IsPeeking) UpdateNap();
-        UpdateTone();
+        // Off screen there's nothing beneath it to match: keep the color it left with.
+        if (!_away) UpdateTone();
         _cat.Step();
         // Other topmost windows (and Explorer restarts) can push us down; quietly climb back.
         if (++_frames % ReassertTopmostEveryNFrames == 0) ApplyZOrder();
