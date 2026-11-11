@@ -22,6 +22,9 @@ public sealed class SettingsWindow : Window
 
     private static readonly string[] MonitorChoices = ["primary", "all"];
 
+    /// <summary>A fresh config, for each setting's default value.</summary>
+    private static readonly WidgetConfig Defaults = new();
+
     private readonly ConfigStore _store;
     private readonly Action _openJson;
     private readonly DispatcherTimer _save;
@@ -127,8 +130,8 @@ public sealed class SettingsWindow : Window
 
         p.Children.Add(Header("Look"));
         p.Children.Add(Row("Opacity", SliderBox(0.1, 1, _cfg.Opacity, 0.05, Percent, v => _cfg.Opacity = v)));
-        p.Children.Add(Row("Text color", ColorBox(_cfg.TextColor, v => _cfg.TextColor = v)));
-        p.Children.Add(Row("Accent color", ColorBox(_cfg.AccentColor, v => _cfg.AccentColor = v)));
+        p.Children.Add(Row("Text color", ColorBox(_cfg.TextColor, Defaults.TextColor, v => _cfg.TextColor = v)));
+        p.Children.Add(Row("Accent color", ColorBox(_cfg.AccentColor, Defaults.AccentColor, v => _cfg.AccentColor = v)));
         p.Children.Add(Row("Font", EditableCombo(
             Fonts.SystemFontFamilies.Select(f => f.Source).OrderBy(n => n), _cfg.FontFamily, v => _cfg.FontFamily = v)));
         p.Children.Add(Row("Font weight", Combo(["Thin", "ExtraLight", "Light", "Normal", "Medium", "SemiBold", "Bold"],
@@ -216,7 +219,7 @@ public sealed class SettingsWindow : Window
         p.Children.Add(Row("Size", SliderBox(0.5, 3, c.Scale, 0.1, v => $"{v:0.0}×", v => c.Scale = v)));
         p.Children.Add(Row("From the right (px)", NumberBox(c.OffsetX, v => c.OffsetX = v)));
         p.Children.Add(Row("Monitors", EditableCombo(MonitorChoices, c.Monitors, v => c.Monitors = v)));
-        p.Children.Add(Row("Light color", ColorBox(c.LightColor, v => c.LightColor = v)));
+        p.Children.Add(Row("Light color", ColorBox(c.LightColor, Defaults.Cat.LightColor, v => c.LightColor = v)));
         p.Children.Add(Check("Softer color over the desktop and terminals", c.AdaptToBackground, v => c.AdaptToBackground = v));
         return Scroll(p);
     }
@@ -376,15 +379,26 @@ public sealed class SettingsWindow : Window
         return box;
     }
 
-    /// <summary>A hex color field with a swatch; only valid colors are saved.</summary>
-    private UIElement ColorBox(string value, Action<string> set)
+    /// <summary>
+    /// A hex color field with a swatch; only valid colors are saved. Clicking the swatch opens a
+    /// color picker that previews live and puts the old color back on Cancel.
+    /// </summary>
+    private UIElement ColorBox(string value, string defaultValue, Action<string> set)
     {
         var swatch = new Border
         {
             Width = 22, Height = 22, Margin = new Thickness(0, 0, 8, 0), CornerRadius = new CornerRadius(3),
             BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1),
+            Cursor = System.Windows.Input.Cursors.Hand, ToolTip = "Pick a color",
         };
         var box = new TextBox { Text = value, Width = 110, VerticalContentAlignment = VerticalAlignment.Center };
+        swatch.MouseLeftButtonUp += (_, _) =>
+        {
+            var before = box.Text;
+            var picker = new ColorPickerWindow(TryColor(before.Trim()) ?? Colors.White, TryColor(defaultValue) ?? Colors.White,
+                c => box.Text = Hex(c)) { Owner = this };
+            if (picker.ShowDialog() != true) box.Text = before;
+        };
         void Paint()
         {
             var color = TryColor(box.Text.Trim());
@@ -405,6 +419,9 @@ public sealed class SettingsWindow : Window
         panel.Children.Add(box);
         return panel;
     }
+
+    private static string Hex(Color c) =>
+        c.A == 255 ? $"#{c.R:X2}{c.G:X2}{c.B:X2}" : $"#{c.A:X2}{c.R:X2}{c.G:X2}{c.B:X2}";
 
     private static Color? TryColor(string s)
     {
