@@ -1,0 +1,17 @@
+# Build output
+bin/
+obj/
+
+# IDE / user files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Runtime files written next to the exe
+overlay.log
+sensors.txt
+
+# Personal study notes
+LEARNING.md
