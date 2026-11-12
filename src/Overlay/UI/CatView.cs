@@ -332,6 +332,7 @@ public sealed class CatView : FrameworkElement
     private bool _running;
     private bool _peeking;
     private bool _peekPaws;
+    private bool _leaning;
     private bool _flipped;
     private bool _jumping;  // mid-leap: the stretched-out gallop frame
     // The squish runs on its own clock: the frame rate (8 fps) is too slow for a snappy pop.
@@ -432,6 +433,39 @@ public sealed class CatView : FrameworkElement
         _nextBubble = _rng.Next(40, 120); // settle back in before it "thinks" again
         _zs.Clear();
         InvalidateVisual();
+    }
+
+    /// <summary>
+    /// Leaning away from a notification that covers part of it (the window tilts the whole view):
+    /// the bubble and z's would tilt with it, so they're dropped for as long as it does.
+    /// </summary>
+    public void SetLeaning(bool leaning)
+    {
+        if (leaning == _leaning) return;
+        _leaning = leaning;
+        _phrase = null;
+        _nextBubble = _rng.Next(40, 120);
+        _zs.Clear();
+        InvalidateVisual();
+    }
+
+    /// <summary>
+    /// While it's tilted, the cat is drawn upright into a bitmap that gets rotated with smoothing:
+    /// the blocks stay crisp inside, and the outline isn't stair-stepped. Upright it goes back to
+    /// being drawn directly, pixel-exact.
+    /// </summary>
+    public void SetSmoothTilt(bool smooth)
+    {
+        if (smooth)
+        {
+            CacheMode = new BitmapCache(2) { SnapsToDevicePixels = false }; // rendered at 2x, so rotating it stays sharp
+            RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.Fant);
+        }
+        else
+        {
+            CacheMode = null;
+            RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.Unspecified);
+        }
     }
 
     public void SetPeekPaws(bool paws)
@@ -608,7 +642,7 @@ public sealed class CatView : FrameworkElement
             _nextScan = _rng.Next(60, 140);
         }
 
-        if (!_asleep && !_peeking && _thoughts) StepBubble();
+        if (!_asleep && !_peeking && !_leaning && _thoughts) StepBubble();
         InvalidateVisual();
     }
 

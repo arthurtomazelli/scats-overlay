@@ -71,6 +71,44 @@ internal static class PopupWindows
     }
 
     /// <summary>
+    /// What a toast window holds right now: whether it has a card element in it at all (a
+    /// window-type element under its first pane), and how wide the card is on screen (0 when
+    /// there isn't one). Windows keeps that window open, and still hit-testable, between one toast
+    /// and the next and only swaps what it holds, so the window being visible doesn't mean
+    /// there's a card. While a card slides in or out it's narrower than the window; once gone it's
+    /// off screen or missing. Cross-process and slow-ish: call it off the UI thread.
+    /// </summary>
+    public static (bool HasCardElement, int Width, string Name) CardWidth(IntPtr popup)
+    {
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var pane = walker.GetFirstChild(AutomationElement.FromHandle(popup));
+            if (pane is null) return (false, 0, "");
+            bool any = false;
+            int width = 0;
+            string name = "";
+            for (var c = walker.GetFirstChild(pane); c is not null; c = walker.GetNextSibling(c))
+            {
+                if (c.Current.ControlType != ControlType.Window) continue;
+                any = true;
+                var r = c.Current.BoundingRectangle;
+                if (!c.Current.IsOffscreen && !r.IsEmpty && r.Height > 1 && r.Width >= width)
+                {
+                    width = (int)r.Width;
+                    name = c.Current.Name; // the toast's text, which tells one toast from the next
+                }
+            }
+            return (any, width, name);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Could not check a popup's card", ex);
+            return (false, 0, "");
+        }
+    }
+
+    /// <summary>
     /// Could <paramref name="hwnd"/> be a popup? Size isn't judged here: some popups (Steam's)
     /// sit in a much bigger transparent window, so that's checked on the measured card instead
     /// (<see cref="IsPopupSized"/>).
