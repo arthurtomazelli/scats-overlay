@@ -13,22 +13,20 @@ namespace Overlay.UI;
 /// Every so often it crouches and leaps over the big cat to its other side. It naps when the big
 /// cat naps, and keeps out of sight while the big cat runs, peeks or is away.
 /// </summary>
-public sealed class KittenWindow : Window
+public sealed class KittenWindow : CatPopupWindow
 {
     private const int ReassertTopmostEveryNFrames = 40;
     private const double JumpSeconds = 0.55;
     private const int TailGapBlocks = 2;  // by the tip of the big cat's tail
     private const int SideGapBlocks = 3;  // landing on the other side, it keeps some room from the big cat
     private const double KittenStrideFactor = 1.5;
+    private const double OffsetEaseDip = 250; // DIPs per second it drops back to the big cat's tail side
 
-    private enum Act { Sit, Crouch, Jump, Land }
+    private enum Act { Sit, Crouch, Leap, Land }
 
-    private readonly CatView _cat = new();
     private readonly DispatcherTimer _timer;
     private readonly Random _rng = new();
-    private readonly Stopwatch _jumpClock = new();
-    private CatConfig _cfg;
-    private IntPtr _hwnd;
+    private readonly Stopwatch _leapClock = new();
     private long _frames;
     private Color _tint;
     private bool _hidden = true;
@@ -36,13 +34,12 @@ public sealed class KittenWindow : Window
     private bool _onTailSide = true;
     private Act _act;
     private long _nextActAt, _actUntil;
-    private double _jumpT;
-    private double _jumpFromX, _jumpToX, _jumpHeight; // body centers and arc height, physical pixels
+    private double _leapT;
+    private double _leapFromX, _leapToX, _leapHeight; // body centers and arc height, physical pixels
 
-    public KittenWindow(CatWindow mom, CatConfig cfg)
+    public KittenWindow(CatWindow mom, CatConfig cfg) : base(cfg, mom.ScreenName)
     {
         Mom = mom;
-        _cfg = cfg;
         _nextActAt = Environment.TickCount64 + NextJumpWaitMs();
 
         WindowStyle = WindowStyle.None;
@@ -71,12 +68,16 @@ public sealed class KittenWindow : Window
         };
         DpiChanged += (_, _) => ApplyConfig(_cfg);
         Mom.Moved += OnMomMoved;
+        Mom.Clicked += OnMomClicked;
         Closed += (_, _) =>
         {
             Mom.Moved -= OnMomMoved;
+            Mom.Clicked -= OnMomClicked;
             _timer.Stop();
-            CompositionTarget.Rendering -= OnJumpFrame;
+            CompositionTarget.Rendering -= OnLeapFrame;
             CompositionTarget.Rendering -= OnFollowFrame;
+            CompositionTarget.Rendering -= OnPeekFrame;
+            CompositionTarget.Rendering -= OnLeanFrame;
         };
     }
 
@@ -89,6 +90,9 @@ public sealed class KittenWindow : Window
         _tint = Mom.CurrentColor;
         var look = new CatConfig { Scale = cfg.Kitten.Scale, Thoughts = false, Moods = false, BubbleFont = cfg.BubbleFont };
         _cat.Configure(look, VisualTreeHelper.GetDpi(this).PixelsPerDip, _tint);
+        // Room around the view so it can tilt (lean) without being cut off, like the big cat.
+        double room = LeanRoomBlocks * _cat.BlockSize;
+        _cat.Margin = new Thickness(room, 0, room, 0);
         // A changed range applies to the wait in progress, not just the one after it.
         if (_act == Act.Sit) _nextActAt = Environment.TickCount64 + NextJumpWaitMs();
         ApplyZOrder();
@@ -103,9 +107,26 @@ public sealed class KittenWindow : Window
             _cat.SetTint(_tint);
         }
 
-        // Whatever the big cat does (runs, peeks), it does too, a beat later.
-        if (!_following && Mom.CurrentMove.Kind != CatWindow.MoveKind.Seated) StartFollowing();
-        if (_following || Mom.Seated is not { } mom)
+        // When the big cat runs off (or is out of sight) it runs after it, a beat later.
+        var kind = Mom.CurrentMove.Kind;
+        if (!_following && kind is CatWindow.MoveKind.Running or CatWindow.MoveKind.Away or CatWindow.MoveKind.Hidden) StartFollowing();
+        if (_following)
+        {
+            _cat.Step();
+            return;
+        }
+
+        // Otherwise it stays by the big cat's spot (even while the big cat peeks over a popup) and
+        // reacts to popups over itself on its own, just like the big cat does.
+        ScreenName = Mom.ScreenName;
+        var seat = kind == CatWindow.MoveKind.Peeking ? Mom.HomeSeat : Mom.Seated;
+        if (seat is not { } mom)
+        {
+            _cat.Step();
+            return;
+        }
+        UpdatePeek();
+        if (IsPeeking || _leaning)
         {
             _cat.Step();
             return;
@@ -117,17 +138,17 @@ public sealed class KittenWindow : Window
             case Act.Sit:
                 // Naps along with the big cat; otherwise, now and then, leaps over it.
                 _cat.SetAsleep(mom.Asleep);
-                if (!mom.Asleep && now >= _nextActAt) StartCrouch(now);
+                if (!mom.Asleep && kind == CatWindow.MoveKind.Seated && now >= _nextActAt) StartCrouch(now);
                 break;
             case Act.Crouch:
-                if (now >= _actUntil) StartJump(mom);
+                if (now >= _actUntil) StartLeap(mom);
                 break;
             case Act.Land:
                 if (now >= _actUntil) Settle(now);
                 break;
         }
 
-        if (_act != Act.Jump) Place(mom);
+        if (_act != Act.Leap) Sit(mom);
         _cat.Step();
     }
 
@@ -141,92 +162,105 @@ public sealed class KittenWindow : Window
     }
 
     /// <summary>Over the big cat's head in an arc, to its other side.</summary>
-    private void StartJump(CatWindow.SeatedPose mom)
+    private void StartLeap(CatWindow.SeatedPose mom)
     {
         double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
-        _jumpFromX = BodyCenter(mom, _onTailSide, scale);
-        _jumpToX = BodyCenter(mom, !_onTailSide, scale);
+        _leapFromX = BodyCenter(mom, _onTailSide, scale);
+        _leapToX = BodyCenter(mom, !_onTailSide, scale);
         // High enough that its feet clear the big cat's ears with a block to spare.
-        _jumpHeight = mom.Floor - mom.Top + _cat.BlockSize * 2 * scale;
-        _jumpT = 0;
-        _act = Act.Jump;
+        _leapHeight = mom.Floor - mom.Top + _cat.BlockSize * 2 * scale;
+        _leapT = 0;
+        _act = Act.Leap;
         _cat.Unsquish();
-        _cat.Flipped = _jumpToX > _jumpFromX; // leaps the way it faces
-        _jumpClock.Restart();
-        CompositionTarget.Rendering += OnJumpFrame;
+        _cat.Flipped = _leapToX > _leapFromX; // leaps the way it faces
+        _leapClock.Restart();
+        CompositionTarget.Rendering += OnLeapFrame;
     }
 
-    private void OnJumpFrame(object? sender, EventArgs e)
+    private void OnLeapFrame(object? sender, EventArgs e)
     {
         if (Mom.Seated is not { } mom)
         {
             Vanish();
             return;
         }
-        double dt = Math.Min(0.05, _jumpClock.Elapsed.TotalSeconds);
-        _jumpClock.Restart();
-        _jumpT = Math.Min(1, _jumpT + dt / JumpSeconds);
+        double dt = Math.Min(0.05, _leapClock.Elapsed.TotalSeconds);
+        _leapClock.Restart();
+        _leapT = Math.Min(1, _leapT + dt / JumpSeconds);
 
         double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         // Mostly up first and mostly down at the end, so it clears the big cat rather than
         // stretching across it near the ground.
-        double across = _jumpT * _jumpT * (3 - 2 * _jumpT);
-        double center = _jumpFromX + (_jumpToX - _jumpFromX) * across;
-        double lift = _jumpHeight * 4 * _jumpT * (1 - _jumpT);
+        double across = _leapT * _leapT * (3 - 2 * _leapT);
+        double center = _leapFromX + (_leapToX - _leapFromX) * across;
+        double lift = _leapHeight * 4 * _leapT * (1 - _leapT);
         // Only stretched out once it's up past the big cat's shoulders: lower down, the wide leap
         // pose would cut across the big cat, so it goes up (and comes down) in its sitting pose.
         _cat.SetJumping(lift >= (mom.Floor - mom.Top) * 0.55);
         double middle = _cat.IsJumping ? _cat.RunSpriteLeft + _cat.RunSpriteWidth / 2 : _cat.BodyLeft + _cat.BodyWidth / 2;
         double x = center - middle * scale;
         double y = mom.Floor - ActualHeight * scale - lift;
-        WindowPlacement.MoveTo(_hwnd, (int)Math.Round(x), (int)Math.Round(y));
+        WindowPlacement.MoveTo(_hwnd, (int)Math.Round(x) - RoomPx, (int)Math.Round(y));
 
-        if (_jumpT < 1) return;
-        StopJump();
+        if (_leapT < 1) return;
+        StopLeap();
         _onTailSide = !_onTailSide;
         _act = Act.Land;
         _actUntil = Environment.TickCount64 + CatView.SquishMs + 100;
-        Place(mom);
+        Sit(mom);
         _cat.Squish(); // lands
     }
 
-    private void StopJump()
+    private void StopLeap()
     {
-        CompositionTarget.Rendering -= OnJumpFrame;
-        _jumpClock.Stop();
+        CompositionTarget.Rendering -= OnLeapFrame;
+        _leapClock.Stop();
         _cat.SetJumping(false);
     }
 
     // --- following the big cat -----------------------------------------------------------
     //
-    // While the big cat isn't sitting in its spot, the kitten records what it does every frame and
-    // replays it a beat later (a fresh 150-350 ms each time, so it never looks mechanical),
-    // shifted to its own side: it runs after the big cat along the same path, ending up in its own
-    // spot when the big cat reaches its; and it peeks over the same edge next to it, riding it
-    // down, landing and getting up just after it does.
+    // While the big cat runs off (or is out of sight), the kitten records what it does every frame
+    // and replays it a beat later (a fresh 150-350 ms each time, so it never looks mechanical): it
+    // runs after the big cat along the same path, always behind it (on its tail side, whichever side
+    // it was sitting on: from the far side it waits for the big cat to run past first), ending up in
+    // its spot when the big cat reaches its. Popups are the kitten's own business: it reacts to them like the big cat does.
 
     private bool _following;
     private readonly List<(long T, CatWindow.Move Move)> _trail = [];
     private readonly Stopwatch _followClock = new();
     private long _delayMs;
-    private double _offset;        // its body's center minus the big cat's, when both sit
-    private double _peekOffset;    // same while peeking, chosen so it's over the card; NaN = not peeking
+    private double _offset;        // its body's center minus the big cat's, while following
+    private double _offsetGoal;    // where that settles: on the tail side, behind the big cat
+    private bool _waitForMom;      // it sits ahead of the big cat on its way: waits in place until the big cat has gone past
     private string _screen = "";   // the screen it's on (or last left)
     private double _x;             // its body's center, screen pixels
     private bool _onScreen;        // some of it is showing on _screen
     private int _runDir;
     private double _runSpeed;      // pixels per second, for carrying on off-screen by itself
     private double _strideLeft;    // DIPs until the next gallop step
-    private bool _wasLanded;
 
     private void OnMomMoved()
     {
-        if (!_following && _hwnd != IntPtr.Zero) StartFollowing();
+        if (!_following && _hwnd != IntPtr.Zero && Mom.CurrentMove.Kind is CatWindow.MoveKind.Running or CatWindow.MoveKind.Away or CatWindow.MoveKind.Hidden)
+            StartFollowing();
+    }
+
+    /// <summary>A click on the kitten itself squishes it, like the big cat.</summary>
+    private void OnMomClicked(int x, int y)
+    {
+        if (_hwnd == IntPtr.Zero || _hidden || _following || _act == Act.Leap || IsPeeking || _leaning
+            || !Native.GetWindowRect(_hwnd, out var r)) return;
+        double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        int left = r.Left + RoomPx;
+        if (x >= left && x < left + _cat.CatWidth * scale && y >= r.Bottom - _cat.CatHeight * scale && y < r.Bottom)
+            _cat.Squish();
     }
 
     private void StartFollowing()
     {
-        if (_act == Act.Jump) StopJump();
+        EndPeekOrLeanNow();
+        if (_act == Act.Leap) StopLeap();
         Settle(Environment.TickCount64);
         _cat.SetAsleep(false);
 
@@ -234,14 +268,19 @@ public sealed class KittenWindow : Window
         var home = Mom.HomeSeat;
         double momCenter = (home.BodyLeft + home.BodyRight) / 2.0;
         _offset = BodyCenter(home, _onTailSide, scale) - momCenter;
+        // The big cat runs the way it faces, so its tail side is always the way back: the kitten
+        // runs there, even from the other side (where it would run ahead of it).
+        _offsetGoal = BodyCenter(home, true, scale) - momCenter;
+        // Ahead of the big cat on its way (the other side from where it runs to)? Then it stays put
+        // and lets the big cat run past before it starts after it.
+        _waitForMom = !_hidden && _offset * Mom.CurrentMove.Dir > 0;
+        _onTailSide = true;
         _x = Native.GetWindowRect(_hwnd, out var r) && !_hidden
-            ? r.Left + (_cat.BodyLeft + _cat.BodyWidth / 2) * scale
+            ? r.Left + RoomPx + (_cat.BodyLeft + _cat.BodyWidth / 2) * scale
             : momCenter + _offset;
         _screen = Mom.ScreenName;
         _onScreen = !_hidden;
         _runSpeed = 0;
-        _peekOffset = double.NaN;
-        _wasLanded = false;
         _delayMs = _rng.Next(150, 351);
         _trail.Clear();
         _following = true;
@@ -269,9 +308,6 @@ public sealed class KittenWindow : Window
             case CatWindow.MoveKind.Running:
                 FollowRun(move, dt, scale);
                 break;
-            case CatWindow.MoveKind.Peeking:
-                FollowPeek(move, live, scale);
-                break;
             case CatWindow.MoveKind.Away:
                 // Off it goes too, on its own if the big cat is already out of sight.
                 if (_onScreen && _runSpeed > 0) RunOn(dt, scale);
@@ -281,8 +317,9 @@ public sealed class KittenWindow : Window
                 HideFollowing();
                 break;
             case CatWindow.MoveKind.Seated:
+            case CatWindow.MoveKind.Peeking:
                 // Caught up: back in its spot, and once the big cat has stayed put, done.
-                if (_trail.All(t => t.Move.Kind == CatWindow.MoveKind.Seated)) EndFollowing();
+                if (_trail.All(t => t.Move.Kind is CatWindow.MoveKind.Seated or CatWindow.MoveKind.Peeking)) EndFollowing();
                 break;
         }
     }
@@ -294,8 +331,6 @@ public sealed class KittenWindow : Window
     /// </summary>
     private void FollowRun(CatWindow.Move move, double dt, double scale)
     {
-        _peekOffset = double.NaN;
-        _cat.SetPeeking(false);
         _runDir = move.Dir;
         if (move.Screen != _screen)
         {
@@ -305,6 +340,22 @@ public sealed class KittenWindow : Window
                 return;
             }
             _screen = move.Screen;
+        }
+        if (_waitForMom)
+        {
+            // Sitting ahead of the big cat: holds still until the big cat's center is past its own,
+            // then runs after it from where it sat.
+            if ((move.CenterX - _x) * move.Dir <= _cat.BodyWidth / 2 * scale) return;
+            _waitForMom = false;
+            _offset = _x - move.CenterX;
+        }
+        if (_offset != _offsetGoal)
+        {
+            // Settling onto the trailing side, only ever forward: it never slides back while the
+            // big cat gets going.
+            double step = OffsetEaseDip * scale * dt;
+            _offset += Math.Clamp(_offsetGoal - _offset, -step, step);
+            if ((move.CenterX + _offset - _x) * move.Dir < 0) _offset = _x - move.CenterX;
         }
         double x = move.CenterX + _offset;
         double moved = Math.Abs(x - _x);
@@ -336,91 +387,13 @@ public sealed class KittenWindow : Window
         var area = Screens.ByName(_screen).WorkingArea;
         double left = x - (_cat.BodyLeft + _cat.BodyWidth / 2) * scale;
         double y = area.Bottom - ActualHeight * scale;
-        WindowPlacement.MoveTo(_hwnd, (int)Math.Round(left), (int)Math.Round(y));
+        WindowPlacement.MoveTo(_hwnd, (int)Math.Round(left) - RoomPx, (int)Math.Round(y));
         _hidden = false;
         // Only the part on this screen shows, like the big cat.
         double x0 = Math.Max(0, (area.Left - left) / scale), x1 = (area.Right - left) / scale;
         _cat.Clip = new RectangleGeometry(new Rect(x0, 0, Math.Max(0, x1 - x0), Math.Max(0, ActualHeight)));
         double spriteLeft = left + _cat.RunSpriteLeft * scale, spriteRight = spriteLeft + _cat.RunSpriteWidth * scale;
         _onScreen = spriteRight > area.Left && spriteLeft < area.Right;
-    }
-
-    /// <summary>
-    /// Peeks over the same edge next to the big cat. Deciding to come up and to get back up
-    /// happen a beat after the big cat (<paramref name="move"/>); but once its paws are on the
-    /// edge it goes with the edge as it is now (<paramref name="live"/>): riding it down, dropping
-    /// when it vanishes and landing at the same moment as the big cat, since they're on the same card.
-    /// </summary>
-    private void FollowPeek(CatWindow.Move move, CatWindow.Move live, double scale)
-    {
-        _runSpeed = 0;
-        _screen = move.Screen;
-        _cat.SetRunning(false);
-
-        // Its own side if that's over the card too, else the big cat's other side, else it sits it out.
-        if (double.IsNaN(_peekOffset))
-        {
-            var home = Mom.HomeSeat;
-            double momCenter = (home.BodyLeft + home.BodyRight) / 2.0;
-            double half = _cat.BodyWidth / 2 * scale;
-            bool Fits(double offset) => move.CenterX + offset - half >= move.CardLeft && move.CenterX + offset + half <= move.CardRight;
-            double other = BodyCenter(home, !_onTailSide, scale) - momCenter;
-            if (Fits(_offset)) _peekOffset = _offset;
-            else if (Fits(other)) _peekOffset = other;
-            else _peekOffset = double.PositiveInfinity;
-        }
-        if (double.IsInfinity(_peekOffset))
-        {
-            HideFollowing();
-            return;
-        }
-
-        _x = move.CenterX + _peekOffset;
-        _cat.Flipped = _peekOffset < 0; // on the big cat's left it faces right, toward it
-        var area = Screens.ByName(_screen).WorkingArea;
-        double paws = (_cat.GridTop + (CatView.PeekEdgeRow + 1) * _cat.BlockSize) * scale;
-        double floorY = area.Bottom - paws, homeY = area.Bottom - ActualHeight * scale;
-        double y, edge;
-        if (move.GetUp >= 0)
-        {
-            _cat.SetPeeking(false); // whole again, rising from behind the taskbar
-            y = floorY - move.GetUp * (floorY - homeY);
-            edge = move.Edge;
-        }
-        else
-        {
-            _cat.SetPeeking(true);
-            _cat.SetPeekPaws(move.Paws);
-            bool up = move.Paws || _wasLanded;
-            if (!up)
-            {
-                // Still coming up, a beat behind.
-                y = Math.Min(move.PawsLine - paws, floorY);
-                edge = move.Edge;
-            }
-            else if (live.Kind == CatWindow.MoveKind.Peeking && live.GetUp < 0)
-            {
-                // Hanging on the same edge as the big cat, right now.
-                y = Math.Min(live.PawsLine - paws, floorY);
-                edge = live.Edge;
-                if (live.Landed && !_wasLanded) _cat.Squish(); // touchdown, together
-                _wasLanded = live.Landed;
-            }
-            else
-            {
-                // The big cat is already getting up; this one stays down a beat longer.
-                y = floorY;
-                edge = area.Bottom;
-                if (!_wasLanded) _cat.Squish();
-                _wasLanded = true;
-            }
-        }
-
-        double left = _x - (_cat.BodyLeft + _cat.BodyWidth / 2) * scale;
-        WindowPlacement.MoveTo(_hwnd, (int)Math.Round(left), (int)Math.Round(y));
-        _hidden = false;
-        _onScreen = true;
-        _cat.Clip = new RectangleGeometry(new Rect(0, 0, Math.Max(0, ActualWidth), Math.Max(0, (edge - y) / scale)));
     }
 
     private void HideFollowing()
@@ -442,9 +415,8 @@ public sealed class KittenWindow : Window
         _cat.SetRunning(false);
         _cat.SetPeeking(false);
         _cat.Clip = null;
-        if (!double.IsNaN(_peekOffset) && !double.IsInfinity(_peekOffset)) _onTailSide = Math.Abs(_peekOffset - _offset) < 1;
         Settle(Environment.TickCount64);
-        if (Mom.Seated is { } mom) Place(mom);
+        if (Mom.Seated is { } mom) Sit(mom);
     }
 
     // --- placement ------------------------------------------------------------------------
@@ -472,14 +444,14 @@ public sealed class KittenWindow : Window
     /// Sits next to the big cat: by the tip of its tail, or at its other flank. Either way it
     /// faces the big cat (unmirrored it faces left, so on the right it's unmirrored).
     /// </summary>
-    private void Place(CatWindow.SeatedPose mom)
+    private void Sit(CatWindow.SeatedPose mom)
     {
         double scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         bool onRight = OnRight(mom, _onTailSide);
         _cat.Flipped = !onRight;
         double x = BodyCenter(mom, _onTailSide, scale) - (_cat.BodyLeft + _cat.BodyWidth / 2) * scale;
         double y = mom.Floor - ActualHeight * scale;
-        WindowPlacement.MoveTo(_hwnd, (int)Math.Round(x), (int)Math.Round(y));
+        WindowPlacement.MoveTo(_hwnd, (int)Math.Round(x) - RoomPx, (int)Math.Round(y));
         _hidden = false;
     }
 
@@ -499,11 +471,22 @@ public sealed class KittenWindow : Window
     /// <summary>Out of sight while the big cat isn't sitting in its spot; whatever it was doing stops.</summary>
     private void Vanish()
     {
-        if (_act == Act.Jump) StopJump();
+        if (_act == Act.Leap) StopLeap();
         if (_act != Act.Sit) Settle(Environment.TickCount64);
         if (_hidden || _hwnd == IntPtr.Zero) return;
         WindowPlacement.MoveTo(_hwnd, -32000, -32000);
         _hidden = true;
+    }
+
+    protected override int HomeX(System.Drawing.Rectangle area, double scale) =>
+        (int)Math.Round(BodyCenter(Mom.HomeSeat, _onTailSide, scale) - (_cat.BodyLeft + _cat.BodyWidth / 2) * scale);
+
+    protected override bool PopupsBlocked => _following || _hidden || _act != Act.Sit || _cat.Asleep;
+
+    protected override void Reposition()
+    {
+        if (_hwnd == IntPtr.Zero || _following || _act == Act.Leap || IsPeeking || _leaning) return;
+        Sit(Mom.HomeSeat);
     }
 
     private void ApplyZOrder()

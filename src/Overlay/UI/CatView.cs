@@ -378,12 +378,18 @@ public sealed class CatView : FrameworkElement
     /// <summary>Top of the cat's grid inside the view (below the bubble room), in DIPs.</summary>
     public double GridTop => _top;
 
-    /// <summary>Horizontal extent of the sitting body (ears to flanks, no tail) inside the view, in DIPs.</summary>
-    public double BodyLeft => _flipped ? 2 * Pivot - (LeftMargin + 12 * _px) : LeftMargin + _px;
-    public double BodyWidth => 11 * _px;
+    // Unmirrored extents of the pose it's in now (sitting, or lying down, which is wider): the
+    // body's left and right edges (ears to flanks, no tail), and where the tail ends (lying down) or its last block starts (sitting).
+    private double BodyLeft0 => _asleep ? _sleepPx : LeftMargin + _px;
+    private double BodyRight0 => _asleep ? 16 * _sleepPx : LeftMargin + 12 * _px;
+    private double TailTip0 => _asleep ? 18 * _sleepPx : LeftMargin + 16 * _px;
+
+    /// <summary>Horizontal extent of the body in its current pose (no tail) inside the view, in DIPs.</summary>
+    public double BodyLeft => _flipped ? 2 * Pivot - BodyRight0 : BodyLeft0;
+    public double BodyWidth => BodyRight0 - BodyLeft0;
 
     /// <summary>Where the tail stretched out along the ground ends, inside the view, in DIPs.</summary>
-    public double TailTipX => _flipped ? 2 * Pivot - (LeftMargin + 16 * _px) : LeftMargin + 16 * _px;
+    public double TailTipX => _flipped ? 2 * Pivot - TailTip0 : TailTip0;
 
     /// <summary>Where the cat's grid starts inside the view: further in when mirrored, in DIPs.</summary>
     public double GridLeft => _flipped ? 2 * Pivot - CatWidth : 0;
