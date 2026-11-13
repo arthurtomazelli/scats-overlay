@@ -60,6 +60,54 @@ internal static class PopupWindows
         return IntPtr.Zero;
     }
 
+    /// <summary>
+    /// A topmost popup window overlapping <paramref name="spot"/> (physical pixels), not in
+    /// <paramref name="skip"/>, found by walking the windows top to bottom instead of hit-testing:
+    /// a toast window that stays open and empty would otherwise hide a flyout beneath it.
+    /// </summary>
+    public static IntPtr TopmostIn(System.Drawing.Rectangle spot, IntPtr self, ICollection<IntPtr> skip,
+        System.Drawing.Rectangle monitor, out System.Drawing.Rectangle bounds)
+    {
+        IntPtr found = IntPtr.Zero;
+        var foundBounds = System.Drawing.Rectangle.Empty;
+        EnumWindows((h, lp) =>
+        {
+            if (h == self || skip.Contains(h)) return true;
+            int ex = GetWindowLong(h, GWL_EXSTYLE);
+            if ((ex & WS_EX_TRANSPARENT) != 0) return true;
+            // Shell flyouts and toasts live in their own band and aren't always flagged topmost.
+            if ((ex & WS_EX_TOPMOST) == 0 && Native.ClassNameOf(h) != "Windows.UI.Core.CoreWindow") return true;
+            if (!IsPopup(h, out var b, out _) || !b.IntersectsWith(spot) || !IsPopupSized(b, monitor)) return true;
+            found = h;
+            foundBounds = b;
+            return false;
+        }, IntPtr.Zero);
+        bounds = foundBounds;
+        return found;
+    }
+
+    /// <summary>Every visible top-level window overlapping <paramref name="spot"/>, top first, for the log.</summary>
+    public static string DescribeIn(System.Drawing.Rectangle spot)
+    {
+        var sb = new StringBuilder();
+        EnumWindows((h, lp) =>
+        {
+            if (!IsWindowVisible(h) || !GetWindowRect(h, out var r)) return true;
+            var b = System.Drawing.Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
+            if (!b.IntersectsWith(spot)) return true;
+            DwmGetWindowAttribute(h, DWMWA_CLOAKED, out int cloaked, sizeof(int));
+            sb.Append($"\n    {Native.ClassNameOf(h)} {b} ex=0x{GetWindowLong(h, GWL_EXSTYLE):X} cloaked={cloaked}");
+            return true;
+        }, IntPtr.Zero);
+        return sb.ToString();
+    }
+
+    private delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+
     /// <summary>True while <paramref name="popup"/> is still on screen; its current bounds come back in <paramref name="bounds"/>.</summary>
     public static bool IsShowing(IntPtr popup, out System.Drawing.Rectangle bounds)
     {
@@ -204,6 +252,12 @@ internal static class PopupWindows
         }
         return rect; // never hit (covered by something else?): keep what we had
     }
+
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TOPMOST = 0x8, WS_EX_TRANSPARENT = 0x20;
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr hwnd, int index);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);

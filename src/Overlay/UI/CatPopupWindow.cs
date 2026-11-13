@@ -279,6 +279,9 @@ public abstract class CatPopupWindow : Window
             Jump(dt, scale, area, floorY);
             return;
         }
+        if (_peek is PeekPhase.Up or PeekPhase.Rising or PeekPhase.Falling or PeekPhase.Landed) CheckOtherPopup(scale, area, floorY);
+        if (_peek is PeekPhase.Up or PeekPhase.Rising or PeekPhase.Falling or PeekPhase.Landed
+            && ReturnToEarlierPopup(dt, scale, area, floorY)) return;
         // Another card turns up while it's still in the peek, on its way down or getting up: it
         // jumps to the new one instead of carrying on down.
         if ((_peek == PeekPhase.GettingUp || _peek == PeekPhase.Falling) && CurrentCard() is { } fresh
@@ -408,6 +411,127 @@ public abstract class CatPopupWindow : Window
     protected double _jumpT, _jumpDur, _jumpFromY;
     protected int _jumpFromX, _jumpToX;
     protected bool _jumpRising;
+
+    // A different popup (another window: a toast after a volume flyout) appearing over the cat
+    // while it peeks over one: checked a few times a second, measured in the background, then it
+    // jumps over to the new one.
+    protected long _otherCheckAt;
+    protected bool _switching;
+    protected PeekPhase _lastDumpPhase;
+
+    // Popups it has jumped away from, most recent last. When the one it's on leaves, it goes
+    // back to the latest of these that's still on screen instead of dropping to the taskbar.
+    protected readonly List<(IntPtr Hwnd, (int L, int T, int R, int B) Insets, int MinWidth)> _popupStack = [];
+
+    protected void PushCurrentPopup()
+    {
+        if (_popupHwnd == IntPtr.Zero || _cardInsets is not { } inset || _cardTracked) return; // toasts' cards come and go: not worth going back to
+        _popupStack.RemoveAll(e => e.Hwnd == _popupHwnd);
+        _popupStack.Add((_popupHwnd, inset, _cardMinWidth));
+        if (_popupStack.Count > 4) _popupStack.RemoveAt(0);
+    }
+
+    /// <summary>
+    /// The popup it's on has gone: back to the latest earlier one that's still showing.
+    /// True once it has started jumping there.
+    /// </summary>
+    protected bool ReturnToEarlierPopup(double dt, double scale, System.Drawing.Rectangle area, double floorY)
+    {
+        if (_popupStack.Count == 0) return false;
+        var current = CurrentCard();
+        double centerX = _peekX + (_cat.BodyLeft + _cat.BodyWidth / 2) * scale;
+        bool gone = current is not { } c || centerX < c.Left || centerX > c.Right || c.Top >= area.Bottom;
+        if (!gone) return false;
+        for (int i = _popupStack.Count - 1; i >= 0; i--)
+        {
+            var e = _popupStack[i];
+            if (e.Hwnd == _popupHwnd) { _popupStack.RemoveAt(i); continue; }
+            if (!PopupWindows.IsShowing(e.Hwnd, out var bounds))
+            {
+                _popupStack.RemoveAt(i);
+                continue;
+            }
+            var card = Card(bounds, e.Insets);
+            if (!PopupWindows.IsPopupSized(card, Screens.ByName(ScreenName).Bounds) || card.Top >= area.Bottom) continue;
+            _popupStack.RemoveAt(i);
+            _popupHwnd = e.Hwnd;
+            _cardInsets = e.Insets;
+            _cardTracked = false;
+            _cardPresent = true;
+            _cardMinWidth = e.MinWidth;
+            _watchedName = "";
+            _goneSince = 0;
+            Log.Info($"Back to an earlier popup still open: {Native.ClassNameOf(e.Hwnd)} card {card}");
+            StartJump(card, scale, area);
+            Jump(dt, scale, area, floorY);
+            return true;
+        }
+        return false;
+    }
+    protected long _skipClearAt;
+    protected readonly HashSet<IntPtr> _skipped = [];
+
+    protected void CheckOtherPopup(double scale, System.Drawing.Rectangle area, double floorY)
+    {
+        long now = Environment.TickCount64;
+        if (_switching || now < _otherCheckAt) return;
+        _otherCheckAt = now + 100;
+        // From the cat down to the taskbar: a smaller popup left open below the one it's on counts too.
+        int top = (int)Math.Round(_peekY);
+        var spot = new System.Drawing.Rectangle(
+            _peekX + (int)Math.Round(_cat.BodyLeft * scale), top,
+            (int)Math.Round(_cat.BodyWidth * scale), Math.Max(1, area.Bottom - top));
+        if (now > _skipClearAt)
+        {
+            _skipped.Clear(); // windows that turned out empty get another look now and then
+            _skipClearAt = now + 400;
+        }
+        var hwnd = PopupWindows.Covering(spot, _hwnd, out var bounds);
+        // Nothing above the cat, or only what it's on already: look at what's under it too
+        // (a flyout the cat was raised over isn't "above" it any more).
+        if (hwnd == IntPtr.Zero || hwnd == _popupHwnd || _skipped.Contains(hwnd))
+        {
+            _skipped.Add(_popupHwnd);
+            hwnd = PopupWindows.TopmostIn(spot, _hwnd, _skipped, Screens.ByName(ScreenName).Bounds, out bounds);
+        }
+        if (hwnd == IntPtr.Zero && _peek != _lastDumpPhase)
+        {
+            _lastDumpPhase = _peek;
+            Log.Info($"No other popup found while {_peek}; spot {spot}; windows there:{PopupWindows.DescribeIn(spot)}");
+        }
+        if (hwnd == IntPtr.Zero || hwnd == _ignoredPopup || hwnd == _popupHwnd) return;
+        Log.Info($"Other popup candidate while {_peek}: {Native.ClassNameOf(hwnd)} {bounds}");
+        _switching = true;
+        Task.Run(() => (Bounds: PopupWindows.VisibleBounds(hwnd, bounds), Card: PopupWindows.CardWidth(hwnd)))
+            .ContinueWith(t => Dispatcher.BeginInvoke(() =>
+            {
+                _switching = false;
+                if (t.IsFaulted || (_peek is PeekPhase.None or PeekPhase.Jumping or PeekPhase.GettingUp)) return;
+                var v = t.Result.Bounds;
+                var (hasCard, cardWidth, cardName) = t.Result.Card;
+                if (hasCard) _toastWindows.Add(hwnd);
+                // Empty or still sliding in: skip it for now (the windows under it get a look).
+                if (_toastWindows.Contains(hwnd) && cardWidth < v.Width * 0.9) { Log.Info($"  skipped (empty toast window, card {cardWidth}px)"); _skipped.Add(hwnd); return; }
+                if (!PopupWindows.IsShowing(hwnd, out var now2) || !PopupWindows.IsPopupSized(v, Screens.ByName(ScreenName).Bounds))
+                {
+                    Log.Info($"  skipped (gone or too big), card {v}");
+                    _skipped.Add(hwnd);
+                    return;
+                }
+                PushCurrentPopup();
+                _popupHwnd = hwnd;
+                _cardTracked = _toastWindows.Contains(hwnd) && cardWidth > 0;
+                _cardPresent = true;
+                _watchedName = cardName;
+                _cardMinWidth = (int)(v.Width * 0.85);
+                _cardInsets = (v.Left - now2.Left, v.Top - now2.Top, now2.Right - v.Right, now2.Bottom - v.Bottom);
+                _goneSince = 0;
+                var area2 = Screens.ByName(ScreenName).WorkingArea;
+                double sc = VisualTreeHelper.GetDpi(this).DpiScaleX;
+                Log.Info($"Another popup over the peeking cat: {Native.ClassNameOf(hwnd)} card {v}");
+                StartJump(v, sc, area2);
+            }), TaskScheduler.Default);
+    }
 
     protected static double EaseOut(double t) => 1 - Math.Pow(1 - Math.Clamp(t, 0, 1), 3);
     protected static double EaseIn(double t) => Math.Clamp(t, 0, 1) * Math.Clamp(t, 0, 1);
@@ -567,6 +691,7 @@ public abstract class CatPopupWindow : Window
         if (IsPeeking) CompositionTarget.Rendering -= OnPeekFrame;
         _peek = PeekPhase.None;
         _peekClock.Stop();
+        _popupStack.Clear();
         _popupHwnd = IntPtr.Zero;
         _cardInsets = null;
         _cat.Clip = null;
