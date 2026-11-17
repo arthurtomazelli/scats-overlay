@@ -49,7 +49,8 @@ up                 11d 15h
 ## Requirements
 
 - Windows 10/11, x64
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) to build
+- [.NET SDK](https://dotnet.microsoft.com/download/dotnet) 8.0 or newer to build (the app targets
+  `net8.0-windows`; to only run a prebuilt exe, the .NET 8 Desktop Runtime is enough)
 - Admin rights and the [PawnIO](https://pawnio.eu/) driver for CPU temperature/clock/power and
   motherboard fans (`winget install namazso.PawnIO`). Without them the widget still runs, just with
   fewer sensors.
